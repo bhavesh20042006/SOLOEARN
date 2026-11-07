@@ -1,0 +1,13 @@
+order_id,order_date,city,category,product,quantity,unit_price,discount_pct
+1001,2026-10-01,Delhi,Electronics,Keyboard,2,899,0
+1002,2026-10-02,Gurgaon,Home,Desk Lamp,1,1299,5
+1003,2026-10-02,Noida,Electronics,Mouse,3,499,0
+1004,2026-10-03,Delhi,Office,Notebook,10,60,0
+1005,2026-10-04,Gurgaon,Home,Chair,1,5499,10
+1006,2026-10-05,Noida,Office,Pen Set,4,120,0
+1007,2026-10-05,Delhi,Electronics,Headphones,1,2499,5
+1008,2026-10-06,Gurgaon,Electronics,Webcam,2,1899,0
+1009,2026-10-07,Noida,Home,Desk Organizer,3,399,0
+1010,2026-10-08,Delhi,Office,Printer Paper,5,320,0
+1011,2026-10-09,Gurgaon,Electronics,Keyboard,1,899,0
+1012,2026-10-10,Noida,Home,Desk Lamp,2,1299,10

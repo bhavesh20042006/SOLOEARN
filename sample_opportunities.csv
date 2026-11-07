@@ -1,0 +1,5 @@
+title,source,url,description,amount_inr,estimated_hours,skill_match_pct,payment_confidence_pct,risk_level,source_permitted
+Monthly Sales Analysis & KPI Pack,Direct Client Inquiry,https://example.com/rfp/kpi-sales,Clean monthly sales data and produce Excel dashboard with summary charts,12000,5,90,85,2,true
+E-commerce Returns Categorization,Inbound Network Referral,https://example.com/rfp/returns-audit,Clean returns export and profile top return reasons with summary report,7500,3.5,85,80,3,true
+Marketing Campaign Attribution Review,Authorized Client Portal,https://example.com/rfp/attribution,Reconcile UTM source logs against customer purchase exports,9500,4,80,75,3,true
+Quarterly Expense Audit Spreadsheet,Direct Contact,https://example.com/rfp/expense-audit,Standardize inconsistent vendor names and reconcile categorized expenses,6000,3,95,90,1,true
