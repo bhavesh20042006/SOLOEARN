@@ -5,6 +5,8 @@ import hashlib
 import ipaddress
 import json
 import re
+import socket
+import urllib.error
 import urllib.request
 import xml.etree.ElementTree as ET
 from dataclasses import asdict, dataclass, field
@@ -97,7 +99,8 @@ def extract_budget_inr(text: str) -> float:
 def validate_source_url(url: str) -> tuple[bool, str]:
     """
     Validates URL safety and guards against Server-Side Request Forgery (SSRF).
-    Only http and https protocols are permitted; local and private network addresses are blocked.
+    Only http and https protocols are permitted; local, link-local, loopback and private network addresses are blocked.
+    Performs comprehensive DNS address resolution to prevent DNS rebinding attacks.
     """
     if not url or not isinstance(url, str):
         return False, "URL is empty or invalid"
@@ -114,29 +117,68 @@ def validate_source_url(url: str) -> tuple[bool, str]:
         return False, "URL hostname is missing"
 
     # Reject localhost & internal loopback hosts
-    if hostname.lower() in ("localhost", "127.0.0.1", "::1", "0.0.0.0"):
+    if hostname.lower() in ("localhost", "127.0.0.1", "::1", "0.0.0.0", "local"):
         return False, f"SSRF Protection: Access to localhost ({hostname}) is forbidden."
 
-    # Check for private IP address ranges
+    # 1. Check if hostname itself is an IP address
     try:
         ip = ipaddress.ip_address(hostname)
-        if ip.is_private or ip.is_loopback or ip.is_reserved or ip.is_link_local:
+        if ip.is_private or ip.is_loopback or ip.is_reserved or ip.is_link_local or ip.is_multicast:
             return False, f"SSRF Protection: Private or reserved IP address ({hostname}) is forbidden."
     except ValueError:
-        # Hostname is a domain name, not a raw IP address
         pass
 
+    # 2. DNS Resolution check: resolve all IP addresses for domain hostname
+    try:
+        addr_infos = socket.getaddrinfo(hostname, None)
+        for _, _, _, _, sockaddr in addr_infos:
+            ip_str = sockaddr[0]
+            try:
+                ip = ipaddress.ip_address(ip_str)
+                if ip.is_private or ip.is_loopback or ip.is_reserved or ip.is_link_local or ip.is_multicast:
+                    return False, f"SSRF Protection: Hostname '{hostname}' resolves to private/reserved IP {ip_str}."
+            except ValueError:
+                pass
+    except (socket.gaierror, socket.herror):
+        # Hostname could not be resolved via DNS
+        pass
+    except Exception as exc:
+        return False, f"SSRF DNS check failure: {exc}"
+
     return True, ""
+
+
+class SafeSSRFRedirectHandler(urllib.request.HTTPRedirectHandler):
+    """Intercepts HTTP redirects to verify destination does not violate SSRF protections."""
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        is_safe, reason = validate_source_url(newurl)
+        if not is_safe:
+            raise urllib.error.HTTPError(
+                newurl, 403, f"SSRF Blocked: Redirect to unsafe location '{newurl}' denied: {reason}", headers, fp
+            )
+        return super().redirect_request(req, fp, code, msg, headers, newurl)
+
+
+def safe_urlopen(req_or_url: str | urllib.request.Request, timeout: float = 12.0):
+    """Opens a URL using an opener hardened against SSRF redirects."""
+    opener = urllib.request.build_opener(SafeSSRFRedirectHandler)
+    return opener.open(req_or_url, timeout=timeout)
 
 
 def parse_feed_xml(xml_content: str | bytes, source_name: str = "RSS Feed") -> list[dict[str, Any]]:
     """
     Parses RSS 2.0 or Atom XML feed content safely using standard library ElementTree.
+    Hardened against XML External Entity (XXE) and Billion Laughs entity expansion attacks.
     """
     if isinstance(xml_content, str):
         xml_bytes = xml_content.encode("utf-8")
     else:
         xml_bytes = xml_content
+
+    # Strict XXE and DOCTYPE entity expansion defense
+    lower_bytes = xml_bytes.lower()
+    if b"<!doctype" in lower_bytes or b"<!entity" in lower_bytes or b"system " in lower_bytes or b"public " in lower_bytes:
+        raise ValueError("XML Parsing Security Violation: DOCTYPE and ENTITY declarations are forbidden (XXE protection).")
 
     try:
         root = ET.fromstring(xml_bytes)
@@ -465,7 +507,7 @@ class DiscoveryEngine:
                         s_target,
                         headers={"User-Agent": "SOLOEARN-DiscoveryAgent/1.0 (Private Workbench; Local-First)"},
                     )
-                    with urllib.request.urlopen(req, timeout=12.0) as resp:
+                    with safe_urlopen(req, timeout=12.0) as resp:
                         content = resp.read()
                 raw_items = parse_feed_xml(content, s_name)
 
@@ -482,7 +524,7 @@ class DiscoveryEngine:
                         s_target,
                         headers={"User-Agent": "SOLOEARN-DiscoveryAgent/1.0 (Private Workbench; Local-First)"},
                     )
-                    with urllib.request.urlopen(req, timeout=12.0) as resp:
+                    with safe_urlopen(req, timeout=12.0) as resp:
                         content = resp.read()
                 raw_items = parse_json_leads(content, s_name)
 

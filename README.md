@@ -40,6 +40,31 @@ A local-first, single-owner prototype for organizing legitimate paid-work opport
   - Multi-level deduplication: canonicalizes URLs and hashes title/description via SHA-256 fingerprinting.
   - Tailored Proposal Generator (`core/proposal_generator.py`): produces honest, professional proposals referencing the verified deliverable bundle (`business_analysis.xlsx`, `cleaned_data.csv`, `report.html`, charts) and 6-suite QA guarantee with zero hallucinated promises.
   - Explicit Human Authorization Gate: proposals start as `draft` and strictly require owner review and checkbox authorization before submission.
+- **Autonomous Revenue Operations, Invoicing & Multi-Service Execution (Milestone 5)**:
+  - **5 Production Service Tiers**:
+    1. *Tier 1: Data Analytics & Excel Pack* (₹5,000) — multi-tab Excel workbooks, statistical profiles, distribution charts, executive HTML presentations.
+    2. *Tier 2: Data Engineering & Automated Pipelines* (₹15,000) — cleaned datasets, schema manifests, data dictionaries, production Python ETL scripts (`pipeline.py`), and test suites.
+    3. *Tier 3: Executive Interactive HTML5 Dashboards* (₹20,000) — standalone offline-ready HTML5 dashboards with responsive layouts, real-time client-side search, KPI metric cards, and SVG visuals.
+    4. *Tier 2: Business Process Automation* (₹15,000) — modular Python automation scripts with JSON configs, error handling, logging, and unit tests.
+    5. *Tier 1/2: Software Automation Tools* (₹10,000-₹15,000) — command-line utilities with arg parsing, validation, and documentation.
+  - **SSRF & Security Hardening**:
+    - Comprehensive DNS resolution checks resolving all IPv4/IPv6 addresses to reject private, loopback, link-local, and reserved subnets.
+    - Custom redirect handler `SafeSSRFRedirectHandler` blocking 301/302 redirects to unsafe or internal destinations.
+    - Deterministic XML/XXE defense disallowing `<!DOCTYPE` and `<!ENTITY` declarations in RSS/Atom feeds.
+  - **Concurrency & Atomic Database Locking**:
+    - Atomic SQL claims (`claim_opportunity_for_execution`) preventing race conditions during concurrent execution requests.
+    - SQLite WAL mode with 5,000ms busy timeout.
+  - **Client Invoicing & Payment Verification Workflow**:
+    - Generates formal print-ready HTML invoices (`INV-YYYY-XXXX.html`) with line items, tax, and audit guarantee.
+    - Strict payment receipt verification requiring owner confirmation checkbox, bank reference (UTR/Transaction ID), and exact amount matching before revenue is marked paid.
+  - **Unattended Daemon Scheduler & Crash Recovery**:
+    - Periodic background discovery polling.
+    - Automatic crash recovery restoring interrupted tasks on startup.
+    - Health heartbeat file (`data/daemon_heartbeat.json`).
+  - **Revenue Target Optimizer (Goal: ≥ ₹1,00,000 / Month)**:
+    - Real-time Month-to-Date (MTD) tracking, gap analysis, and operational recommendations.
+    - Proven service mix: 8 Tier-1 jobs (₹40,000) + 3 Tier-2 jobs (₹45,000) + 1 Tier-3 job (₹20,000) = ₹1,05,000/month.
+    - Hourly yield ranking sorting opportunities by risk-adjusted ₹/hour.
 - Optional local Ollama connection for proposal drafting and aggregate-only report observations.
 - CSV workbench that creates:
   - `business_analysis.xlsx` (cleaned data, data-quality profile, numeric summary)

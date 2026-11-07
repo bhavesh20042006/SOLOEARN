@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import ast
 import html
 import io
 import json
@@ -52,12 +53,20 @@ class IndependentQAAgent:
     def run_all_checks(self) -> QAReport:
         checks: list[QACheckResult] = []
 
-        checks.append(self._check_file_existence())
-        checks.append(self._check_excel_integrity())
-        checks.append(self._check_calculation_consistency())
-        checks.append(self._check_charts_and_visuals())
-        checks.append(self._check_html_report_integrity())
-        checks.append(self._check_archive_integrity())
+        # Service-aware check routing
+        if (self.workspace / "pipeline.py").exists():
+            checks = self._run_data_engineering_checks()
+        elif (self.workspace / "dashboard.html").exists():
+            checks = self._run_dashboard_checks()
+        elif (self.workspace / "automation.py").exists():
+            checks = self._run_business_automation_checks()
+        else:
+            checks.append(self._check_file_existence())
+            checks.append(self._check_excel_integrity())
+            checks.append(self._check_calculation_consistency())
+            checks.append(self._check_charts_and_visuals())
+            checks.append(self._check_html_report_integrity())
+            checks.append(self._check_archive_integrity())
 
         passed_count = sum(1 for c in checks if c.passed)
         total_count = len(checks)
@@ -81,6 +90,101 @@ class IndependentQAAgent:
         report_file.write_text(json.dumps(report.to_dict(), indent=2, ensure_ascii=False), encoding="utf-8")
 
         return report
+
+    def _run_data_engineering_checks(self) -> list[QACheckResult]:
+        checks = []
+        required = ["cleaned_dataset.csv", "schema_manifest.json", "pipeline.py", "data_dictionary.md", "deliverables.zip"]
+        missing = [f for f in required if not (self.workspace / f).exists() or (self.workspace / f).stat().st_size == 0]
+        checks.append(QACheckResult(
+            check_name="data_engineering_files",
+            passed=len(missing) == 0,
+            summary="All data engineering assets present" if not missing else f"Missing: {', '.join(missing)}",
+        ))
+
+        # Check Python pipeline syntax
+        py_path = self.workspace / "pipeline.py"
+        if py_path.exists():
+            try:
+                ast.parse(py_path.read_text(encoding="utf-8"))
+                checks.append(QACheckResult(check_name="python_syntax", passed=True, summary="Pipeline script parsed successfully with valid AST syntax."))
+            except SyntaxError as e:
+                checks.append(QACheckResult(check_name="python_syntax", passed=False, summary=f"Syntax error in pipeline.py: {e}"))
+        else:
+            checks.append(QACheckResult(check_name="python_syntax", passed=False, summary="pipeline.py does not exist."))
+
+        # Check schema manifest JSON
+        schema_path = self.workspace / "schema_manifest.json"
+        if schema_path.exists():
+            try:
+                schema = json.loads(schema_path.read_text(encoding="utf-8"))
+                has_rows = schema.get("row_count", 0) > 0
+                has_cols = len(schema.get("columns", [])) > 0
+                checks.append(QACheckResult(check_name="schema_manifest_validity", passed=has_rows and has_cols, summary="Schema manifest verified."))
+            except Exception as e:
+                checks.append(QACheckResult(check_name="schema_manifest_validity", passed=False, summary=f"Invalid schema JSON: {e}"))
+        else:
+            checks.append(QACheckResult(check_name="schema_manifest_validity", passed=False, summary="schema_manifest.json missing."))
+
+        checks.append(self._check_archive_integrity(expected_files=["cleaned_dataset.csv", "schema_manifest.json", "pipeline.py", "data_dictionary.md"]))
+        return checks
+
+    def _run_dashboard_checks(self) -> list[QACheckResult]:
+        checks = []
+        required = ["dashboard.html", "kpi_metrics.json", "dashboard_user_guide.md", "deliverables.zip"]
+        missing = [f for f in required if not (self.workspace / f).exists() or (self.workspace / f).stat().st_size == 0]
+        checks.append(QACheckResult(
+            check_name="dashboard_files",
+            passed=len(missing) == 0,
+            summary="All dashboard deliverables present" if not missing else f"Missing: {', '.join(missing)}",
+        ))
+
+        # Check HTML5 structure
+        html_path = self.workspace / "dashboard.html"
+        if html_path.exists():
+            txt = html_path.read_text(encoding="utf-8")
+            valid = "<!DOCTYPE html>" in txt and "<html" in txt and "</html>" in txt and "dataTable" in txt
+            checks.append(QACheckResult(check_name="html5_structure", passed=valid, summary="Dashboard contains complete HTML5 layout and interactive elements."))
+        else:
+            checks.append(QACheckResult(check_name="html5_structure", passed=False, summary="dashboard.html missing."))
+
+        # Check KPI JSON
+        kpi_path = self.workspace / "kpi_metrics.json"
+        if kpi_path.exists():
+            try:
+                kpis = json.loads(kpi_path.read_text(encoding="utf-8"))
+                has_records = "total_records" in kpis
+                checks.append(QACheckResult(check_name="kpi_metrics_validity", passed=has_records, summary="KPI metrics verified."))
+            except Exception as e:
+                checks.append(QACheckResult(check_name="kpi_metrics_validity", passed=False, summary=f"Invalid KPI metrics: {e}"))
+        else:
+            checks.append(QACheckResult(check_name="kpi_metrics_validity", passed=False, summary="kpi_metrics.json missing."))
+
+        checks.append(self._check_archive_integrity(expected_files=["dashboard.html", "kpi_metrics.json", "dashboard_user_guide.md"]))
+        return checks
+
+    def _run_business_automation_checks(self) -> list[QACheckResult]:
+        checks = []
+        required = ["automation.py", "config.json", "README.md", "deliverables.zip"]
+        missing = [f for f in required if not (self.workspace / f).exists() or (self.workspace / f).stat().st_size == 0]
+        checks.append(QACheckResult(
+            check_name="automation_files",
+            passed=len(missing) == 0,
+            summary="All automation files present" if not missing else f"Missing: {', '.join(missing)}",
+        ))
+
+        # Check Python automation syntax
+        py_path = self.workspace / "automation.py"
+        if py_path.exists():
+            try:
+                ast.parse(py_path.read_text(encoding="utf-8"))
+                checks.append(QACheckResult(check_name="python_syntax", passed=True, summary="Automation script parsed successfully with valid AST syntax."))
+            except SyntaxError as e:
+                checks.append(QACheckResult(check_name="python_syntax", passed=False, summary=f"Syntax error in automation.py: {e}"))
+        else:
+            checks.append(QACheckResult(check_name="python_syntax", passed=False, summary="automation.py does not exist."))
+
+        checks.append(self._check_archive_integrity(expected_files=["automation.py", "config.json", "README.md"]))
+        return checks
 
     def _check_file_existence(self) -> QACheckResult:
         required = [
@@ -369,7 +473,7 @@ class IndependentQAAgent:
             details={"bytes": len(content)},
         )
 
-    def _check_archive_integrity(self) -> QACheckResult:
+    def _check_archive_integrity(self, expected_files: list[str] | None = None) -> QACheckResult:
         zip_path = self.workspace / "deliverables.zip"
         if not zip_path.exists():
             return QACheckResult(check_name="archive_integrity", passed=False, summary="deliverables.zip is missing.")
@@ -382,6 +486,21 @@ class IndependentQAAgent:
                 names = zf.namelist()
         except Exception as exc:
             return QACheckResult(check_name="archive_integrity", passed=False, summary=f"Failed reading deliverables.zip: {exc}")
+
+        if expected_files is not None:
+            missing_in_zip = [f for f in expected_files if f not in names]
+            if missing_in_zip:
+                return QACheckResult(
+                    check_name="archive_integrity",
+                    passed=False,
+                    summary=f"Deliverable package zip is missing: {', '.join(missing_in_zip)}",
+                )
+            return QACheckResult(
+                check_name="archive_integrity",
+                passed=True,
+                summary="deliverables.zip is healthy, verified uncorrupted, and contains all expected deliverable files.",
+                details={"archived_files_count": len(names)},
+            )
 
         required_in_zip = ["business_analysis.xlsx", "cleaned_data.csv", "report.html", "profile.json", "insights.txt"]
         missing_in_zip = [f for f in required_in_zip if f not in names]

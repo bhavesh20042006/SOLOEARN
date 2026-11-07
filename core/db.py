@@ -20,6 +20,8 @@ def connect() -> Generator[sqlite3.Connection, None, None]:
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA foreign_keys = ON")
     conn.execute("PRAGMA journal_mode = WAL")
+    conn.execute("PRAGMA busy_timeout = 5000")
+    conn.execute("PRAGMA synchronous = NORMAL")
     try:
         yield conn
         conn.commit()
@@ -108,6 +110,41 @@ def init_db() -> None:
                 updated_at TEXT NOT NULL,
                 FOREIGN KEY(opportunity_id) REFERENCES opportunities(id)
             );
+
+            CREATE TABLE IF NOT EXISTS invoices (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                invoice_number TEXT UNIQUE NOT NULL,
+                opportunity_id INTEGER NOT NULL,
+                task_id INTEGER,
+                client_name TEXT NOT NULL,
+                service_tier TEXT NOT NULL DEFAULT 'data_analytics',
+                amount_subtotal REAL NOT NULL,
+                tax_rate REAL NOT NULL DEFAULT 0.0,
+                tax_amount REAL NOT NULL DEFAULT 0.0,
+                amount_total REAL NOT NULL,
+                currency TEXT NOT NULL DEFAULT 'INR',
+                status TEXT NOT NULL DEFAULT 'issued',
+                payment_reference TEXT DEFAULT '',
+                payment_verified_by_owner INTEGER NOT NULL DEFAULT 0,
+                notes TEXT DEFAULT '',
+                issued_at TEXT NOT NULL,
+                due_at TEXT NOT NULL,
+                paid_at TEXT,
+                artifact_path TEXT DEFAULT '',
+                FOREIGN KEY(opportunity_id) REFERENCES opportunities(id),
+                FOREIGN KEY(task_id) REFERENCES tasks(id)
+            );
+
+            CREATE TABLE IF NOT EXISTS revisions (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                task_id INTEGER NOT NULL,
+                client_feedback TEXT NOT NULL,
+                diff_summary TEXT DEFAULT '',
+                status TEXT NOT NULL DEFAULT 'requested',
+                created_at TEXT NOT NULL,
+                completed_at TEXT,
+                FOREIGN KEY(task_id) REFERENCES tasks(id)
+            );
             """
         )
         # Check column migration for content_hash in existing tables
@@ -172,8 +209,10 @@ VALID_OPPORTUNITY_TRANSITIONS: dict[str, set[str]] = {
     "in_progress": {"submission_ready", "needs_manual_review", "approved_for_work", "rejected"},
     "needs_manual_review": {"in_progress", "rejected"},
     "submission_ready": {"submitted_by_owner", "in_progress", "rejected"},
-    "submitted_by_owner": {"won", "lost"},
-    "won": set(),  # terminal state
+    "submitted_by_owner": {"won", "lost", "invoiced"},
+    "won": {"invoiced", "paid"},
+    "invoiced": {"paid", "lost"},
+    "paid": set(),  # terminal completed state
     "lost": {"shortlisted", "new"},  # can reopen
     "rejected": {"new", "shortlisted"},  # can reopen
 }
@@ -195,6 +234,13 @@ VALID_PROPOSAL_STATUSES: set[str] = {
     "rejected",
 }
 
+VALID_INVOICE_STATUSES: set[str] = {
+    "issued",
+    "payment_pending",
+    "paid",
+    "cancelled",
+}
+
 
 def update_opportunity_status(item_id: int, status: str) -> None:
     allowed = {
@@ -206,6 +252,8 @@ def update_opportunity_status(item_id: int, status: str) -> None:
         "needs_manual_review",
         "submitted_by_owner",
         "won",
+        "invoiced",
+        "paid",
         "lost",
         "rejected",
     }
@@ -222,18 +270,18 @@ def update_opportunity_status(item_id: int, status: str) -> None:
                 raise ValueError(
                     f"Illegal status transition: cannot move opportunity from '{current_status}' to '{status}'."
                 )
-        if status in {"approved_for_work", "in_progress", "submission_ready", "submitted_by_owner", "won"} and not row["source_permitted"]:
+        if status in {"approved_for_work", "in_progress", "submission_ready", "submitted_by_owner", "won", "invoiced", "paid"} and not row["source_permitted"]:
             raise ValueError("Cannot approve work from a source that has not been marked as permitted")
 
-        if status in {"submission_ready", "submitted_by_owner"}:
+        if status in {"submission_ready", "submitted_by_owner", "invoiced", "paid"}:
             task_row = conn.execute(
-                "SELECT id, status, artifact_path FROM tasks WHERE opportunity_id=? AND status='submission_ready'",
+                "SELECT id, status, artifact_path FROM tasks WHERE opportunity_id=? AND status IN ('submission_ready', 'completed')",
                 (item_id,),
             ).fetchone()
             if task_row is None or not task_row["artifact_path"]:
                 raise ValueError(
                     f"Cannot mark opportunity #{item_id} as '{status}': "
-                    "no associated task has completed QA with a verified submission_ready deliverable package."
+                    "no associated task has completed QA with a verified deliverable package."
                 )
 
         conn.execute("UPDATE opportunities SET status=? WHERE id=?", (status, item_id))
@@ -334,7 +382,7 @@ def add_revenue(
             opp_row = conn.execute("SELECT status FROM opportunities WHERE id=?", (opportunity_id,)).fetchone()
             if opp_row is None:
                 raise ValueError("Referenced opportunity does not exist")
-            if status == "paid" and opp_row["status"] not in {"submitted_by_owner", "won"}:
+            if status == "paid" and opp_row["status"] not in {"submitted_by_owner", "won", "invoiced", "paid"}:
                 raise ValueError(
                     f"Cannot record confirmed 'paid' revenue for an opportunity in status '{opp_row['status']}'. "
                     "Work must be submitted by the owner first."
@@ -490,3 +538,262 @@ def list_proposals() -> list[dict[str, Any]]:
                ORDER BY p.id DESC"""
         ).fetchall()
     return [dict(row) for row in rows]
+
+
+# Milestone 5: Revenue Operations, Invoicing, Revisions & Resilient Concurrency
+
+def claim_opportunity_for_execution(opportunity_id: int) -> bool:
+    """
+    Atomically claims an opportunity for execution using an atomic SQL UPDATE.
+    Transitions status from 'approved_for_work' to 'in_progress'.
+    Returns True if successfully claimed; False if already claimed or invalid state.
+    Guarantees thread-safe and process-safe concurrency.
+    """
+    with connect() as conn:
+        cur = conn.execute(
+            """UPDATE opportunities 
+               SET status = 'in_progress' 
+               WHERE id = ? AND status = 'approved_for_work' AND source_permitted = 1""",
+            (opportunity_id,),
+        )
+        claimed = cur.rowcount > 0
+    if claimed:
+        log_event("opportunity_claimed_for_execution", f"id={opportunity_id}")
+    return claimed
+
+
+def recover_interrupted_tasks() -> list[int]:
+    """
+    Identifies tasks or opportunities left in an inconsistent/in_progress state
+    due to process interruption or crash, and recovers them safely to 'approved_for_work'.
+    """
+    recovered_opps: list[int] = []
+    with connect() as conn:
+        rows = conn.execute(
+            """SELECT o.id FROM opportunities o
+               JOIN tasks t ON t.opportunity_id = o.id
+               WHERE o.status = 'in_progress' AND t.status IN ('created', 'in_progress', 'qa_testing', 'revising')"""
+        ).fetchall()
+        for r in rows:
+            opp_id = int(r["id"])
+            conn.execute("UPDATE opportunities SET status = 'approved_for_work' WHERE id = ?", (opp_id,))
+            conn.execute("UPDATE tasks SET status = 'needs_manual_review', notes = 'Interrupted execution recovered on startup' WHERE opportunity_id = ?", (opp_id,))
+            recovered_opps.append(opp_id)
+    if recovered_opps:
+        log_event("crash_recovery_executed", f"recovered_opps={recovered_opps}")
+    return recovered_opps
+
+
+def generate_invoice_number() -> str:
+    """Generates sequential invoice identifier: INV-YYYY-XXXX."""
+    year = datetime.now(timezone.utc).year
+    with connect() as conn:
+        row = conn.execute(
+            "SELECT COUNT(*) FROM invoices WHERE invoice_number LIKE ?",
+            (f"INV-{year}-%",),
+        ).fetchone()
+        count = (row[0] if row else 0) + 1
+    return f"INV-{year}-{count:04d}"
+
+
+def create_invoice(
+    opportunity_id: int,
+    client_name: str,
+    service_tier: str = "data_analytics",
+    amount_subtotal: float = 0.0,
+    tax_rate: float = 0.0,
+    task_id: int | None = None,
+    due_days: int = 14,
+    notes: str = "",
+) -> dict[str, Any]:
+    if not client_name.strip():
+        raise ValueError("Client name cannot be empty")
+    try:
+        subtotal = float(amount_subtotal)
+    except (ValueError, TypeError):
+        raise ValueError("Subtotal must be a valid number")
+    if not math.isfinite(subtotal) or subtotal <= 0:
+        raise ValueError("Subtotal must be a finite number greater than zero")
+
+    tax_rate = max(0.0, float(tax_rate))
+    tax_amount = round(subtotal * (tax_rate / 100.0), 2)
+    amount_total = round(subtotal + tax_amount, 2)
+
+    with connect() as conn:
+        opp = conn.execute("SELECT id, title, status FROM opportunities WHERE id=?", (opportunity_id,)).fetchone()
+        if opp is None:
+            raise ValueError(f"Opportunity #{opportunity_id} not found")
+        if opp["status"] not in {"submitted_by_owner", "won", "invoiced", "submission_ready"}:
+            raise ValueError(
+                f"Cannot generate invoice for opportunity #{opportunity_id} in status '{opp['status']}'. "
+                "Deliverables must be completed and submitted first."
+            )
+
+        inv_num = generate_invoice_number()
+        now = utc_now()
+        due_at = datetime.fromisoformat(now).timestamp() + (due_days * 86400)
+        due_str = datetime.fromtimestamp(due_at, timezone.utc).isoformat(timespec="seconds")
+
+        cur = conn.execute(
+            """INSERT INTO invoices(
+                invoice_number, opportunity_id, task_id, client_name, service_tier,
+                amount_subtotal, tax_rate, tax_amount, amount_total, currency,
+                status, notes, issued_at, due_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'INR', 'issued', ?, ?, ?)""",
+            (
+                inv_num,
+                opportunity_id,
+                task_id,
+                client_name.strip()[:120],
+                service_tier.strip()[:60],
+                subtotal,
+                tax_rate,
+                tax_amount,
+                amount_total,
+                notes.strip()[:1000],
+                now,
+                due_str,
+            ),
+        )
+        inv_id = int(cur.lastrowid)
+
+        # Update opportunity to invoiced if eligible
+        if opp["status"] in {"submitted_by_owner", "won"}:
+            conn.execute("UPDATE opportunities SET status='invoiced' WHERE id=?", (opportunity_id,))
+
+    log_event("invoice_created", f"invoice={inv_num}; total={amount_total}; opp_id={opportunity_id}")
+    return get_invoice(inv_id)  # type: ignore[return-value]
+
+
+def get_invoice(invoice_id: int | None = None, invoice_number: str | None = None) -> dict[str, Any] | None:
+    with connect() as conn:
+        if invoice_id is not None:
+            row = conn.execute("SELECT * FROM invoices WHERE id=?", (invoice_id,)).fetchone()
+        elif invoice_number is not None:
+            row = conn.execute("SELECT * FROM invoices WHERE invoice_number=?", (invoice_number,)).fetchone()
+        else:
+            return None
+    return dict(row) if row else None
+
+
+def list_invoices() -> list[dict[str, Any]]:
+    with connect() as conn:
+        rows = conn.execute(
+            """SELECT i.*, o.title as opportunity_title
+               FROM invoices i
+               JOIN opportunities o ON o.id=i.opportunity_id
+               ORDER BY i.id DESC"""
+        ).fetchall()
+    return [dict(row) for row in rows]
+
+
+def verify_invoice_payment(
+    invoice_id: int,
+    payment_reference: str,
+    verified_amount: float,
+    owner_confirmation: bool = False,
+) -> dict[str, Any]:
+    """
+    Strict payment receipt verification workflow.
+    Requires owner confirmation checkbox, non-empty UTR/transaction reference,
+    and exact amount matching invoice total.
+    """
+    if not owner_confirmation:
+        raise ValueError("Payment verification requires explicit human owner confirmation")
+    if not payment_reference or not payment_reference.strip():
+        raise ValueError("Bank payment reference (UTR / Transaction ID) is required")
+
+    try:
+        amt = float(verified_amount)
+    except (ValueError, TypeError):
+        raise ValueError("Verified amount must be a valid number")
+
+    if not math.isfinite(amt) or amt <= 0:
+        raise ValueError("Verified amount must be a finite number greater than zero")
+
+    with connect() as conn:
+        inv = conn.execute("SELECT * FROM invoices WHERE id=?", (invoice_id,)).fetchone()
+        if inv is None:
+            raise ValueError(f"Invoice #{invoice_id} not found")
+        if inv["status"] == "paid":
+            raise ValueError(f"Invoice #{invoice_id} is already marked as paid")
+
+        inv_total = float(inv["amount_total"])
+        if abs(amt - inv_total) >= 0.01:
+            raise ValueError(
+                f"Payment amount mismatch: received ₹{amt:,.2f} does not match invoice total ₹{inv_total:,.2f}"
+            )
+
+        now = utc_now()
+        conn.execute(
+            """UPDATE invoices 
+               SET status='paid', payment_reference=?, payment_verified_by_owner=1, paid_at=?
+               WHERE id=?""",
+            (payment_reference.strip()[:120], now, invoice_id),
+        )
+
+        opp_id = int(inv["opportunity_id"])
+        task_id = inv["task_id"]
+        # Update opportunity status to paid if allowed
+        opp_row = conn.execute("SELECT status FROM opportunities WHERE id=?", (opp_id,)).fetchone()
+        if opp_row and opp_row["status"] in {"submitted_by_owner", "won", "invoiced"}:
+            conn.execute("UPDATE opportunities SET status='paid' WHERE id=?", (opp_id,))
+
+        # Automatically record paid revenue in financial ledger
+        conn.execute(
+            """INSERT INTO revenue(opportunity_id, task_id, description, amount_inr, status, paid_at, created_at)
+               VALUES (?, ?, ?, ?, 'paid', ?, ?)""",
+            (
+                opp_id,
+                task_id,
+                f"Verified payment for {inv['invoice_number']} ({inv['client_name']}) - Ref: {payment_reference.strip()}",
+                amt,
+                now,
+                now,
+            ),
+        )
+
+    log_event("invoice_payment_verified", f"invoice_id={invoice_id}; ref={payment_reference}; amount={amt}")
+    return get_invoice(invoice_id)  # type: ignore[return-value]
+
+
+def create_revision_request(task_id: int, client_feedback: str) -> int:
+    if not client_feedback.strip():
+        raise ValueError("Client feedback cannot be empty")
+    with connect() as conn:
+        task = conn.execute("SELECT id, status FROM tasks WHERE id=?", (task_id,)).fetchone()
+        if task is None:
+            raise ValueError(f"Task #{task_id} not found")
+
+        cur = conn.execute(
+            """INSERT INTO revisions(task_id, client_feedback, status, created_at)
+               VALUES (?, ?, 'requested', ?)""",
+            (task_id, client_feedback.strip()[:4000], utc_now()),
+        )
+        rev_id = int(cur.lastrowid)
+        conn.execute("UPDATE tasks SET status='revising' WHERE id=?", (task_id,))
+    log_event("revision_requested", f"task_id={task_id}; revision_id={rev_id}")
+    return rev_id
+
+
+def list_revisions(task_id: int | None = None) -> list[dict[str, Any]]:
+    with connect() as conn:
+        if task_id is not None:
+            rows = conn.execute("SELECT * FROM revisions WHERE task_id=? ORDER BY id DESC", (task_id,)).fetchall()
+        else:
+            rows = conn.execute("SELECT * FROM revisions ORDER BY id DESC").fetchall()
+    return [dict(row) for row in rows]
+
+
+def complete_revision(revision_id: int, diff_summary: str = "") -> None:
+    with connect() as conn:
+        rev = conn.execute("SELECT id, task_id FROM revisions WHERE id=?", (revision_id,)).fetchone()
+        if rev is None:
+            raise ValueError(f"Revision #{revision_id} not found")
+        now = utc_now()
+        conn.execute(
+            "UPDATE revisions SET status='completed', diff_summary=?, completed_at=? WHERE id=?",
+            (diff_summary[:2000], now, revision_id),
+        )
+        conn.execute("UPDATE tasks SET status='submission_ready' WHERE id=?", (rev["task_id"],))
+    log_event("revision_completed", f"revision_id={revision_id}")

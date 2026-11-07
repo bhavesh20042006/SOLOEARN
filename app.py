@@ -22,16 +22,22 @@ from core.db import (
     add_discovery_source,
     add_opportunity,
     add_revenue,
+    complete_revision,
     complete_task,
+    create_invoice,
+    create_revision_request,
     create_task,
     delete_discovery_source,
     get_discovery_source,
+    get_invoice,
     get_opportunity,
     get_proposal,
     init_db,
     list_discovery_sources,
+    list_invoices,
     list_opportunities,
     list_proposals,
+    list_revisions,
     list_revenue,
     list_tasks,
     log_event,
@@ -39,14 +45,22 @@ from core.db import (
     recent_audit,
     save_proposal_draft,
     update_opportunity_status,
+    verify_invoice_payment,
 )
 from core.discovery_engine import DiscoveryEngine
+from core.invoice_generator import render_invoice_html
 from core.llm import OllamaClient, draft_proposal
 from core.opportunity_import import (
     commit_imported_opportunities,
     parse_and_validate_opportunities_csv,
 )
 from core.proposal_generator import authorize_proposal, draft_tailored_proposal, generate_proposal_template
+from core.revenue_optimizer import (
+    MONTHLY_REVENUE_TARGET_INR,
+    SERVICE_CATALOG,
+    RevenueOptimizer,
+)
+from core.scheduler import AutonomousDaemonScheduler
 from core.scoring import opportunity_score, score_label
 
 st.set_page_config(page_title="SOLOEARN — Private AI Workbench", page_icon="🧠", layout="wide")
@@ -88,6 +102,8 @@ tabs = st.tabs([
     "Overview",
     "Autonomous Discovery (M4)",
     "Opportunity Pipeline",
+    "Revenue Operations & Invoicing (M5)",
+    "Revenue Target Optimizer (₹1L/mo)",
     "CSV Workbench",
     "Earnings & audit",
 ])
@@ -461,8 +477,200 @@ with tabs[2]:
         st.info("No opportunities have been added yet.")
 
 
-# ----------------- Tab 3: CSV Workbench -----------------
+# ----------------- Tab 3: Revenue Operations & Invoicing (M5) -----------------
 with tabs[3]:
+    st.subheader("🧾 Client Invoicing & Payment Verification (Milestone 5)")
+    st.caption("Generate formal business invoices from completed deliverables, track revisions, and verify bank receipts.")
+
+    inv_col1, inv_col2 = st.columns([1, 1])
+
+    with inv_col1:
+        st.markdown("#### 📝 Create Formal Client Invoice")
+        submitted_opps = [o for o in list_opportunities() if o["status"] in {"submitted_by_owner", "won", "invoiced"}]
+        if submitted_opps:
+            opp_choice = st.selectbox(
+                "Select Delivered Opportunity",
+                options=[o["id"] for o in submitted_opps],
+                format_func=lambda i: next(f"#{o['id']} - {o['title']} (₹{o['amount_inr']:,.0f})" for o in submitted_opps if o["id"] == i),
+                key="inv_opp_choice",
+            )
+            selected_opp = next(o for o in submitted_opps if o["id"] == opp_choice)
+
+            with st.form("create_invoice_form"):
+                client_name = st.text_input("Client Organization / Name", value=f"Client for {selected_opp['title'][:30]}")
+                service_tier = st.selectbox(
+                    "Service Package Tier",
+                    options=["data_analytics", "data_engineering", "interactive_dashboard", "business_automation"],
+                    format_func=lambda t: t.replace("_", " ").title(),
+                )
+                amount_subtotal = st.number_input("Service Subtotal (₹)", min_value=100.0, value=float(selected_opp["amount_inr"]), step=500.0)
+                tax_rate = st.number_input("GST / Tax Rate (%)", min_value=0.0, max_value=28.0, value=0.0, step=1.0)
+                due_days = st.number_input("Payment Due Within (Days)", min_value=1, max_value=60, value=14)
+                notes = st.text_area("Invoice Notes & Deliverable Reference", value="Deliverables verified and accepted via Independent QA audit.")
+
+                create_inv_btn = st.form_submit_button("Generate & Issue Official Invoice")
+                if create_inv_btn:
+                    try:
+                        inv = create_invoice(
+                            opportunity_id=opp_choice,
+                            client_name=client_name,
+                            service_tier=service_tier,
+                            amount_subtotal=amount_subtotal,
+                            tax_rate=tax_rate,
+                            due_days=int(due_days),
+                            notes=notes,
+                        )
+                        # Render HTML invoice document
+                        html_path = render_invoice_html(inv)
+                        st.success(f"Invoice {inv['invoice_number']} created successfully!")
+                        st.rerun()
+                    except Exception as exc:
+                        st.error(f"Error creating invoice: {exc}")
+        else:
+            st.info("No completed deliverables have been submitted by the owner yet. Submit a completed job in the Opportunity Pipeline first.")
+
+    with inv_col2:
+        st.markdown("#### 💳 Verify Bank Payment & Confirm Revenue")
+        pending_invoices = [i for i in list_invoices() if i["status"] in {"issued", "payment_pending"}]
+        if pending_invoices:
+            verify_inv_id = st.selectbox(
+                "Select Invoice Awaiting Payment",
+                options=[i["id"] for i in pending_invoices],
+                format_func=lambda i: next(f"{inv['invoice_number']} — {inv['client_name']} (₹{inv['amount_total']:,.0f})" for inv in pending_invoices if inv["id"] == i),
+                key="verify_inv_select",
+            )
+            target_inv = next(i for i in pending_invoices if i["id"] == verify_inv_id)
+
+            with st.form("verify_payment_form"):
+                st.write(f"**Invoice Total:** ₹{target_inv['amount_total']:,.2f}")
+                st.write(f"**Billed To:** {target_inv['client_name']}")
+                payment_ref = st.text_input("Bank Reference / UTR Number / Transaction ID", placeholder="e.g. HDFC9876543210 / UPI-REF-4567")
+                received_amount = st.number_input("Verified Amount Credited (₹)", min_value=1.0, value=float(target_inv["amount_total"]), step=100.0)
+                owner_confirm = st.checkbox("I verify that I have independently logged in and confirmed receipt in my bank account", value=False)
+
+                verify_btn = st.form_submit_button("Confirm Payment & Record Revenue", type="primary")
+                if verify_btn:
+                    try:
+                        paid_inv = verify_invoice_payment(
+                            invoice_id=verify_inv_id,
+                            payment_reference=payment_ref,
+                            verified_amount=received_amount,
+                            owner_confirmation=owner_confirm,
+                        )
+                        render_invoice_html(paid_inv)
+                        st.success(f"Payment verified for {paid_inv['invoice_number']}! ₹{received_amount:,.2f} recorded in financial ledger.")
+                        st.rerun()
+                    except Exception as exc:
+                        st.error(f"Verification failed: {exc}")
+        else:
+            st.info("No invoices currently awaiting payment verification.")
+
+    st.divider()
+    st.markdown("#### 📋 Issued Invoices Ledger")
+    invoices = list_invoices()
+    if invoices:
+        for inv in invoices:
+            badge_emoji = "🟢" if inv["status"] == "paid" else "🟡"
+            with st.expander(f"{badge_emoji} {inv['invoice_number']} — {inv['client_name']} · ₹{inv['amount_total']:,.2f} ({inv['status'].upper()})"):
+                c1, c2, c3 = st.columns(3)
+                c1.write(f"**Service Tier:** {inv['service_tier'].replace('_', ' ').title()}")
+                c1.write(f"**Issued Date:** {inv['issued_at'][:10]}")
+                c2.write(f"**Subtotal:** ₹{inv['amount_subtotal']:,.2f}")
+                c2.write(f"**Tax:** ₹{inv['tax_amount']:,.2f}")
+                c3.write(f"**Total:** ₹{inv['amount_total']:,.2f}")
+                c3.write(f"**Payment Ref:** {inv['payment_reference'] or 'Pending'}")
+
+                # Download HTML invoice
+                inv_html_path = render_invoice_html(inv)
+                if inv_html_path.exists():
+                    st.download_button(
+                        f"📄 Download Invoice {inv['invoice_number']} (HTML)",
+                        data=inv_html_path.read_bytes(),
+                        file_name=f"{inv['invoice_number']}.html",
+                        mime="text/html",
+                        key=f"dl_inv_{inv['id']}",
+                    )
+    else:
+        st.write("No invoices generated yet.")
+
+    st.divider()
+    st.markdown("#### 🔄 Client Revisions & Daemon Health")
+    rc1, rc2 = st.columns(2)
+    with rc1:
+        st.markdown("**Client Revision Requests**")
+        all_revs = list_revisions()
+        if all_revs:
+            st.dataframe(pd.DataFrame(all_revs)[["id", "task_id", "status", "client_feedback", "created_at"]], use_container_width=True, hide_index=True)
+        else:
+            st.caption("No active revision requests.")
+
+    with rc2:
+        st.markdown("**Unattended Daemon Scheduler**")
+        daemon = AutonomousDaemonScheduler()
+        last_hb = daemon.get_last_heartbeat()
+        if last_hb:
+            st.write(f"**Status:** `{last_hb.get('status')}`")
+            st.write(f"**Last Heartbeat:** {last_hb.get('last_run_at')}")
+            st.write(f"**Active Sources Polled:** {last_hb.get('active_sources_count')}")
+            st.write(f"**Crash Recoveries Performed:** {last_hb.get('interrupted_tasks_recovered')}")
+        else:
+            st.caption("Daemon has not run yet.")
+
+        if st.button("Run Daemon Maintenance & Recovery Now"):
+            hb = daemon.run_once()
+            st.success(f"Daemon cycle completed (PID {hb.pid}). Status: {hb.status}. Recovered: {hb.interrupted_tasks_recovered} jobs.")
+            st.rerun()
+
+
+# ----------------- Tab 4: Revenue Target Optimizer (₹1L/mo) -----------------
+with tabs[4]:
+    st.subheader("🎯 Monthly Revenue Target Optimizer (Goal: ≥ ₹1,00,000 / Month)")
+    st.caption("Mathematical unit economics, capacity planner, and priority ranking to reach and maintain a strict ₹1 Lakh/month income run-rate.")
+
+    plan = RevenueOptimizer.analyze_monthly_target(MONTHLY_REVENUE_TARGET_INR)
+
+    st.markdown("### Monthly Performance Dashboard")
+    pc1, pc2, pc3, pc4 = st.columns(4)
+    pc1.metric("Monthly Target", f"₹{plan.monthly_target_inr:,.0f}")
+    pc2.metric("MTD Verified Paid", f"₹{plan.mtd_paid_inr:,.0f}", f"{plan.progress_pct}%")
+    pc3.metric("Invoiced / Pending", f"₹{plan.invoiced_pending_inr:,.0f}")
+    pc4.metric("Active Pipeline", f"₹{plan.pipeline_active_inr:,.0f}")
+
+    st.progress(min(1.0, plan.progress_pct / 100.0), text=f"Progress to ₹1 Lakh: {plan.progress_pct}% (Gap: ₹{plan.target_gap_inr:,.0f})")
+
+    st.info(f"💡 **Recommended Operational Action:** {plan.recommended_action}")
+
+    st.divider()
+    st.markdown("### 📊 Proven ₹1,05,000 Monthly Service Mix")
+    st.write("To earn ≥ ₹1 Lakh per month reliably without burnout, SOLOEARN balances quick-turnaround analytics with higher-tier engineering deliverables:")
+    st.dataframe(pd.DataFrame(plan.optimal_monthly_mix), use_container_width=True, hide_index=True)
+
+    st.divider()
+    st.markdown("### ⚡ Priority Opportunity Queue (Ranked by Hourly Yield)")
+    st.write("Jobs ranked strictly by expected profit per hour (`₹/hour`), favoring high-probability, low-risk clients:")
+    all_opps = list_opportunities()
+    if all_opps:
+        ranked_opps = RevenueOptimizer.rank_opportunities_by_hourly_yield(all_opps)
+        display_data = []
+        for o in ranked_opps[:15]:
+            display_data.append({
+                "ID": o["id"],
+                "Title": o["title"][:40],
+                "Budget (₹)": o["amount_inr"],
+                "Hours": o["estimated_hours"],
+                "Rate (₹/hr)": round(o["amount_inr"] / max(0.5, o["estimated_hours"]), 0),
+                "Skill Match": f"{int(o['skill_match'] * 100)}%",
+                "Confidence": f"{int(o['payment_confidence'] * 100)}%",
+                "Risk": o["risk_level"],
+                "Status": o["status"],
+            })
+        st.dataframe(pd.DataFrame(display_data), use_container_width=True, hide_index=True)
+    else:
+        st.info("No opportunities in pipeline to rank.")
+
+
+# ----------------- Tab 5: CSV Workbench -----------------
+with tabs[5]:
     st.subheader("CSV → business deliverables")
     st.write("Upload a CSV you own or are authorized to process. The worker creates a cleaned CSV, an Excel workbook, data-quality profile, charts and an HTML report.")
     uploaded = st.file_uploader("Choose a CSV file", type=["csv"], help=f"Maximum {MAX_UPLOAD_MB} MB and 250,000 rows in this MVP.")
@@ -517,8 +725,8 @@ with tabs[3]:
         st.dataframe(pd.DataFrame(tasks)[["id", "title", "status", "artifact_path", "created_at"]], use_container_width=True, hide_index=True)
 
 
-# ----------------- Tab 4: Earnings & Audit -----------------
-with tabs[4]:
+# ----------------- Tab 6: Earnings & Audit -----------------
+with tabs[6]:
     st.subheader("Record income")
     st.caption("Only mark an amount as Paid after you have independently confirmed the money arrived in your account.")
     with st.form("revenue_form", clear_on_submit=True):

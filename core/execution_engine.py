@@ -8,7 +8,12 @@ from typing import Any, Callable
 
 from core.analytics import create_analytics_bundle
 from core.config import safe_workspace_path
-from core.db import connect, create_task, log_event, update_task_status
+from core.db import claim_opportunity_for_execution, connect, create_task, log_event, update_task_status
+from core.service_executors import (
+    execute_business_automation_service,
+    execute_dashboard_development_service,
+    execute_data_engineering_service,
+)
 
 
 @dataclass
@@ -146,6 +151,12 @@ class AutonomousExecutionEngine:
                 raise ValueError(f"Opportunity #{opp_id} is from an unpermitted source")
             if opp_row["status"] not in {"approved_for_work", "in_progress"}:
                 raise ValueError(f"Opportunity #{opp_id} is not approved for work (status: '{opp_row['status']}')")
+
+            # Concurrency protection: Atomic claim for execution
+            if task_id is None and opp_row["status"] == "approved_for_work":
+                claimed = claim_opportunity_for_execution(opp_id)
+                if not claimed:
+                    raise RuntimeError(f"Concurrency Lock Violation: Opportunity #{opp_id} is already currently executing.")
         else:
             if not opportunity.get("source_permitted", False):
                 raise ValueError("Opportunity is from an unpermitted source")
@@ -154,13 +165,26 @@ class AutonomousExecutionEngine:
 
         opp_title = opportunity.get("title", Path(filename).name)
 
+        # Detect service tier
+        service_tier = opportunity.get("service_tier", "")
+        combined_text = f"{opp_title.lower()} {opportunity.get('description', '').lower()}"
+        if not service_tier:
+            if "dashboard" in combined_text:
+                service_tier = "interactive_dashboard"
+            elif "pipeline" in combined_text or "etl" in combined_text:
+                service_tier = "data_engineering"
+            elif "automation" in combined_text or "script" in combined_text:
+                service_tier = "business_automation"
+            else:
+                service_tier = "data_analytics"
+
         if task_id is None:
             task_id = create_task(
-                title=f"Autonomous execution: {opp_title}",
-                task_type="autonomous_data_analysis",
+                title=f"Autonomous execution ({service_tier}): {opp_title}",
+                task_type=f"autonomous_{service_tier}",
                 workspace="pending",
                 opportunity_id=opp_id,
-                notes="Executing autonomous work plan.",
+                notes=f"Executing autonomous work plan for {service_tier}.",
             )
 
         workspace = safe_workspace_path(f"task_{task_id:04d}")
@@ -174,18 +198,25 @@ class AutonomousExecutionEngine:
         plan_path = workspace / "execution_plan.json"
         plan_path.write_text(json.dumps(plan.to_dict(), indent=2, ensure_ascii=False), encoding="utf-8")
 
-        # Execute through analytics bundle generator
-        # Update plan step states as execution progresses
+        # Execute according to service tier
         for step in plan.steps:
             step.status = "in_progress"
 
         try:
-            zip_artifact = create_analytics_bundle(
-                file_bytes=file_bytes,
-                filename=filename,
-                task_id=task_id,
-                llm_call=self.llm_call,
-            )
+            if service_tier == "data_engineering":
+                deliverables = execute_data_engineering_service(workspace, file_bytes, filename)
+            elif service_tier == "interactive_dashboard":
+                deliverables = execute_dashboard_development_service(workspace, file_bytes, filename)
+            elif service_tier == "business_automation":
+                deliverables = execute_business_automation_service(workspace, filename, opp_title)
+            else:
+                # Default Tier 1: CSV Analytics Bundle
+                zip_artifact = create_analytics_bundle(
+                    file_bytes=file_bytes,
+                    filename=filename,
+                    task_id=task_id,
+                    llm_call=self.llm_call,
+                )
 
             for step in plan.steps:
                 step.status = "completed"
@@ -194,7 +225,7 @@ class AutonomousExecutionEngine:
             # Update saved plan with completed states
             plan_path.write_text(json.dumps(plan.to_dict(), indent=2, ensure_ascii=False), encoding="utf-8")
 
-            log_event("autonomous_execution_completed", f"task_id={task_id}; opp_id={opp_id}")
+            log_event("autonomous_execution_completed", f"task_id={task_id}; opp_id={opp_id}; service={service_tier}")
             return task_id, workspace, plan
 
         except Exception as exc:
