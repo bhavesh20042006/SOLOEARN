@@ -1,20 +1,58 @@
 from __future__ import annotations
 
-import csv
+import html
 import io
 import json
-import os
+import math
+import re
 import zipfile
-from pathlib import Path
+from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import Any
 
 import pandas as pd
 
+from core.analytics import sanitize_cell_value
+from core.config import MAX_UPLOAD_MB
+
+
+def _safe_child_path(base_dir: Path, filename: str) -> Path:
+    """Resolve a relative output path while rejecting traversal and symlink escapes."""
+    base = Path(base_dir).resolve()
+    raw = str(filename)
+    if not raw or "\x00" in raw:
+        raise ValueError("Output filename is empty or invalid")
+    win_path = PureWindowsPath(raw)
+    posix_path = PurePosixPath(raw)
+    if Path(raw).is_absolute() or win_path.is_absolute() or posix_path.is_absolute() or win_path.drive or win_path.root or raw.startswith(("/", "\\")):
+        raise ValueError("Absolute output paths are not permitted")
+
+    normalised = raw.replace("\\", "/")
+    parts = [part for part in normalised.split("/") if part not in {"", "."}]
+    if not parts or any(part == ".." for part in parts):
+        raise ValueError("Path traversal blocked")
+
+    candidate = base.joinpath(*parts)
+    # Reject existing symlinks in every path component before and after resolution.
+    current = base
+    for part in parts:
+        current = current / part
+        if current.is_symlink():
+            raise ValueError("Symlink output path rejected")
+    resolved = candidate.resolve(strict=False)
+    try:
+        resolved.relative_to(base)
+    except ValueError as exc:
+        raise ValueError("Output path escapes its workspace") from exc
+    return resolved
+
 
 def safe_relative_write(base_dir: Path, filename: str, content: str | bytes) -> Path:
-    out_path = (base_dir / filename).resolve()
-    if not str(out_path).startswith(str(base_dir.resolve())):
-        raise ValueError(f"Path traversal blocked: '{filename}'")
+    base = Path(base_dir).resolve()
+    base.mkdir(parents=True, exist_ok=True)
+    out_path = _safe_child_path(base, filename)
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    # Re-check after creating parent directories to catch symlink races at this layer.
+    out_path = _safe_child_path(base, filename)
     if isinstance(content, str):
         out_path.write_text(content, encoding="utf-8")
     else:
@@ -22,158 +60,233 @@ def safe_relative_write(base_dir: Path, filename: str, content: str | bytes) -> 
     return out_path
 
 
+def _safe_archive_name(name: str) -> str:
+    raw = str(name)
+    win_path = PureWindowsPath(raw)
+    posix_path = PurePosixPath(raw)
+    if not raw or Path(raw).is_absolute() or win_path.is_absolute() or posix_path.is_absolute() or win_path.drive or win_path.root or raw.startswith(("/", "\\")):
+        raise ValueError(f"Unsafe archive member name: {raw!r}")
+    parts = [p for p in raw.replace("\\", "/").split("/") if p not in {"", "."}]
+    if not parts or any(p == ".." for p in parts):
+        raise ValueError(f"Unsafe archive member name: {raw!r}")
+    return "/".join(parts)
+
+
 def package_deliverables_zip(workspace: Path, allowed_filenames: list[str]) -> Path:
-    """Packages only verified deliverable files into deliverables.zip with allow-list security."""
-    zip_path = workspace / "deliverables.zip"
-    with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zf:
-        for fname in allowed_filenames:
-            target = workspace / fname
-            if target.is_symlink():
+    """Package only explicitly allowed, workspace-contained, non-symlink deliverables."""
+    root = Path(workspace).resolve()
+    root.mkdir(parents=True, exist_ok=True)
+    zip_path = _safe_child_path(root, "deliverables.zip")
+    temp_path = _safe_child_path(root, ".deliverables.tmp.zip")
+
+    with zipfile.ZipFile(temp_path, "w", zipfile.ZIP_DEFLATED) as zf:
+        seen: set[str] = set()
+        for item in allowed_filenames:
+            rel_name = _safe_archive_name(item)
+            target = _safe_child_path(root, rel_name)
+            if target == zip_path or target == temp_path:
                 continue
+            if target.is_symlink():
+                raise ValueError(f"Symlinked deliverable rejected: {rel_name}")
             if target.is_file():
-                zf.write(target, arcname=fname)
+                resolved = target.resolve()
+                try:
+                    resolved.relative_to(root)
+                except ValueError as exc:
+                    raise ValueError(f"Deliverable escapes workspace: {rel_name}") from exc
+                if rel_name not in seen:
+                    zf.write(resolved, arcname=rel_name)
+                    seen.add(rel_name)
             elif target.is_dir():
-                for subfile in target.rglob("*"):
-                    if not subfile.is_symlink() and subfile.is_file():
-                        rel = subfile.relative_to(workspace)
-                        zf.write(subfile, arcname=str(rel).replace("\\", "/"))
+                for subfile in sorted(target.rglob("*")):
+                    if subfile.is_symlink():
+                        raise ValueError(f"Symlinked deliverable rejected: {subfile}")
+                    if not subfile.is_file():
+                        continue
+                    resolved = subfile.resolve()
+                    try:
+                        resolved.relative_to(root)
+                    except ValueError as exc:
+                        raise ValueError(f"Deliverable escapes workspace: {subfile}") from exc
+                    arcname = resolved.relative_to(root).as_posix()
+                    if arcname not in seen:
+                        zf.write(resolved, arcname=arcname)
+                        seen.add(arcname)
+    temp_path.replace(zip_path)
     return zip_path
 
 
-def execute_data_engineering_service(workspace: Path, file_bytes: bytes, filename: str) -> list[str]:
-    """
-    Executes Tier 2 Data Engineering & Pipeline Service.
-    Produces cleaned dataset, schema manifest, data dictionary, and production pipeline script.
-    """
-    # 1. Parse and clean raw data
+def _read_csv_strict(file_bytes: bytes, source_name: str) -> pd.DataFrame:
+    if not isinstance(file_bytes, (bytes, bytearray)) or not file_bytes:
+        raise ValueError("A non-empty CSV file is required; no sample data will be substituted.")
+    max_bytes = MAX_UPLOAD_MB * 1024 * 1024
+    if len(file_bytes) > max_bytes:
+        raise ValueError(f"Input file exceeds the configured {MAX_UPLOAD_MB} MB upload limit")
     try:
-        df = pd.read_csv(io.BytesIO(file_bytes))
-    except Exception:
-        df = pd.DataFrame({"id": [1, 2, 3], "category": ["A", "B", "C"], "amount": [100.0, 250.0, 400.0]})
+        df = pd.read_csv(io.BytesIO(bytes(file_bytes)))
+    except Exception as exc:
+        raise ValueError(f"Could not parse input CSV '{Path(source_name).name}': {exc}") from exc
+    if df.empty or len(df.columns) == 0:
+        raise ValueError("The supplied CSV contains no data rows or columns.")
+    if len(df) > 250_000:
+        raise ValueError("For this laptop MVP, limit each CSV to 250,000 rows")
+    return df
 
-    # Normalize column names: lowercase, alphanumeric and underscores
-    clean_cols = [c.strip().lower().replace(" ", "_").replace("-", "_") for c in df.columns]
+
+def _normalise_columns(df: pd.DataFrame) -> pd.DataFrame:
+    clean_cols: list[str] = []
+    for idx, col in enumerate(df.columns, start=1):
+        clean = re.sub(r"[^a-z0-9_]+", "_", str(col).strip().lower()).strip("_")
+        clean_cols.append(clean or f"column_{idx}")
+    if len(set(clean_cols)) != len(clean_cols):
+        raise ValueError("Column normalization produced duplicate names; rename ambiguous source columns and retry.")
+    df = df.copy()
     df.columns = clean_cols
-    # Deduplicate rows
-    df = df.drop_duplicates()
-    # Forward fill or default fill numeric missing values
+    return df
+
+
+def _sanitize_export_frame(df: pd.DataFrame) -> pd.DataFrame:
+    safe = df.copy()
+    for col in safe.columns:
+        if safe[col].dtype == "object" or pd.api.types.is_string_dtype(safe[col].dtype):
+            safe[col] = safe[col].map(sanitize_cell_value)
+    return safe
+
+
+def execute_data_engineering_service(workspace: Path, file_bytes: bytes, filename: str) -> list[str]:
+    """Build an ETL starter pack from the supplied CSV. Invalid input is rejected, never fabricated."""
+    df = _normalise_columns(_read_csv_strict(file_bytes, filename))
+    input_rows = int(len(df))
+    duplicate_rows = int(df.duplicated().sum())
+    df = df.drop_duplicates().copy()
     num_cols = df.select_dtypes(include=["number"]).columns.tolist()
     for col in num_cols:
-        df[col] = df[col].fillna(df[col].mean())
+        mean_val = df[col].mean()
+        if pd.notna(mean_val) and math.isfinite(float(mean_val)):
+            df[col] = df[col].fillna(mean_val)
 
-    # Write cleaned dataset
-    clean_csv_path = workspace / "cleaned_dataset.csv"
-    df.to_csv(clean_csv_path, index=False)
+    safe_df = _sanitize_export_frame(df)
+    safe_relative_write(workspace, "cleaned_dataset.csv", safe_df.to_csv(index=False))
 
-    # 2. Build Schema Manifest
     schema = {
-        "dataset_name": filename,
-        "row_count": len(df),
-        "column_count": len(df.columns),
+        "dataset_name": Path(filename.replace("\\", "/")).name,
+        "input_row_count": input_rows,
+        "row_count": int(len(df)),
+        "duplicate_rows_removed": duplicate_rows,
+        "column_count": int(len(df.columns)),
         "columns": [
             {
                 "name": col,
                 "dtype": str(df[col].dtype),
                 "null_count": int(df[col].isnull().sum()),
-                "distinct_count": int(df[col].nunique()),
+                "distinct_count": int(df[col].nunique(dropna=True)),
             }
             for col in df.columns
         ],
     }
-    safe_relative_write(workspace, "schema_manifest.json", json.dumps(schema, indent=2))
+    safe_relative_write(workspace, "schema_manifest.json", json.dumps(schema, indent=2, allow_nan=False))
 
-    # 3. Generate Production Data Pipeline Script (pipeline.py)
-    pipeline_code = f'''"""
-Production Data Cleaning & Ingestion Pipeline
-Generated by SOLOEARN Autonomous Data Engineering Engine
-"""
+    default_input = json.dumps(Path(filename.replace("\\", "/")).name)
+    pipeline_code = f'''"""Reusable deterministic CSV cleaning pipeline generated by SOLOEARN."""
 from __future__ import annotations
-
 import argparse
+import json
 import logging
-import sys
 from pathlib import Path
+import re
 import pandas as pd
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
+DEFAULT_INPUT = {default_input}
 
-def run_pipeline(input_path: str, output_path: str) -> int:
-    in_file = Path(input_path)
-    out_file = Path(output_path)
-    if not in_file.exists():
-        logging.error(f"Input file not found: {{in_file}}")
+def normalise_headers(columns):
+    result = []
+    for index, column in enumerate(columns, start=1):
+        name = re.sub(r"[^a-z0-9_]+", "_", str(column).strip().lower()).strip("_") or f"column_{{index}}"
+        result.append(name)
+    if len(set(result)) != len(result):
+        raise ValueError("Header normalization created duplicate column names")
+    return result
+
+def sanitize_export_value(value):
+    if not isinstance(value, str):
+        return value
+    stripped = value.strip()
+    if not stripped or stripped[0] not in ("=", "+", "-", "@"):
+        return value
+    try:
+        float(stripped)
+        return value
+    except ValueError:
+        return value if value.startswith("'") else "'" + value
+
+def run_pipeline(input_path: str = DEFAULT_INPUT, output_path: str = "cleaned_dataset.csv") -> int:
+    source = Path(input_path)
+    destination = Path(output_path)
+    if not source.is_file():
+        logging.error("Input file not found: %s", source)
         return 1
-
-    logging.info(f"Loading raw dataset: {{in_file}}")
-    df = pd.read_csv(in_file)
+    df = pd.read_csv(source)
+    if df.empty or len(df.columns) == 0:
+        raise ValueError("Input CSV contains no rows or columns")
     initial_rows = len(df)
-
-    # 1. Standardize headers
-    df.columns = [c.strip().lower().replace(" ", "_").replace("-", "_") for c in df.columns]
-
-    # 2. Deduplicate records
-    df = df.drop_duplicates()
-    dedup_rows = len(df)
-    logging.info(f"Deduplication: removed {{initial_rows - dedup_rows}} duplicate rows")
-
-    # 3. Numeric sanitation
-    for col in df.select_dtypes(include=["number"]).columns:
-        mean_val = df[col].mean()
-        df[col] = df[col].fillna(mean_val)
-
-    # 4. Save processed output
-    out_file.parent.mkdir(parents=True, exist_ok=True)
-    df.to_csv(out_file, index=False)
-    logging.info(f"Successfully processed {{len(df)}} rows to {{out_file}}")
+    df.columns = normalise_headers(df.columns)
+    df = df.drop_duplicates().copy()
+    for column in df.select_dtypes(include=["number"]).columns:
+        mean_value = df[column].mean()
+        if pd.notna(mean_value):
+            df[column] = df[column].fillna(mean_value)
+    for column in df.select_dtypes(include=["object", "string"]).columns:
+        df[column] = df[column].map(sanitize_export_value)
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    df.to_csv(destination, index=False)
+    logging.info("Processed %s rows; removed %s duplicates", len(df), initial_rows - len(df))
     return 0
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Run SOLOEARN Data Cleaning Pipeline")
-    parser.add_argument("--input", default="{filename}", help="Input raw CSV path")
-    parser.add_argument("--output", default="cleaned_dataset.csv", help="Cleaned CSV output path")
+    parser = argparse.ArgumentParser(description="Run SOLOEARN CSV cleaning pipeline")
+    parser.add_argument("--input", default=DEFAULT_INPUT)
+    parser.add_argument("--output", default="cleaned_dataset.csv")
     args = parser.parse_args()
-    sys.exit(run_pipeline(args.input, args.output))
+    raise SystemExit(run_pipeline(args.input, args.output))
 '''
     safe_relative_write(workspace, "pipeline.py", pipeline_code)
 
-    # 4. Data Dictionary documentation
-    dict_md = f"""# Data Dictionary & Schema Documentation
-
-## Overview
-- **Source File:** `{filename}`
-- **Processed Records:** {len(df)}
-- **Attributes:** {len(df.columns)}
-
-## Column Lineage & Transformations
-| Column Name | Data Type | Null Count | Distinct Values | Transformations |
-| :--- | :--- | :--- | :--- | :--- |
-"""
+    dict_md = [
+        "# Data Dictionary & Schema Documentation",
+        "",
+        f"- Source file: `{Path(filename.replace(chr(92), '/')).name}`",
+        f"- Input rows: {input_rows}",
+        f"- Processed rows: {len(df)}",
+        f"- Duplicate rows removed: {duplicate_rows}",
+        f"- Columns: {len(df.columns)}",
+        "",
+        "| Column | Data type | Null count | Distinct values |",
+        "|---|---|---:|---:|",
+    ]
     for col in df.columns:
-        dict_md += f"| `{col}` | `{df[col].dtype}` | {df[col].isnull().sum()} | {df[col].nunique()} | Normalized lowercase header, missing value imputation |\n"
+        safe_col = str(col).replace("|", "\\|").replace("\n", " ")
+        dict_md.append(f"| `{safe_col}` | `{df[col].dtype}` | {int(df[col].isna().sum())} | {int(df[col].nunique(dropna=True))} |")
+    dict_md.extend(["", "## Run", f"`python pipeline.py --input {Path(filename.replace(chr(92), '/')).name!r} --output cleaned_dataset.csv`", ""])
+    safe_relative_write(workspace, "data_dictionary.md", "\n".join(dict_md))
 
-    dict_md += "\n## Pipeline Execution Instructions\n```bash\npython pipeline.py --input raw_data.csv --output cleaned_dataset.csv\n```\n"
-    safe_relative_write(workspace, "data_dictionary.md", dict_md)
-
-    # 5. Unit Test Suite for Pipeline
-    test_code = '''from __future__ import annotations
-
+    test_code = '''from pathlib import Path
+import tempfile
 import unittest
-from pathlib import Path
 import pandas as pd
 from pipeline import run_pipeline
 
 class TestDataPipeline(unittest.TestCase):
     def test_pipeline_execution(self):
-        in_p = Path("cleaned_dataset.csv")
-        out_p = Path("test_output.csv")
-        if in_p.exists():
-            ret = run_pipeline(str(in_p), str(out_p))
-            self.assertEqual(ret, 0)
-            self.assertTrue(out_p.exists())
-            df = pd.read_csv(out_p)
-            self.assertGreater(len(df), 0)
-            if out_p.exists():
-                out_p.unlink()
+        with tempfile.TemporaryDirectory() as folder:
+            base = Path(folder)
+            source = base / "input.csv"
+            output = base / "output.csv"
+            pd.DataFrame({"Item Name": ["A", "A", "B"], "Amount": [1, 1, 2]}).to_csv(source, index=False)
+            self.assertEqual(run_pipeline(str(source), str(output)), 0)
+            result = pd.read_csv(output)
+            self.assertEqual(len(result), 2)
+            self.assertEqual(list(result.columns), ["item_name", "amount"])
 
 if __name__ == "__main__":
     unittest.main()
@@ -186,246 +299,244 @@ if __name__ == "__main__":
 
 
 def execute_dashboard_development_service(workspace: Path, file_bytes: bytes, filename: str) -> list[str]:
-    """
-    Executes Tier 3 Interactive Dashboard Development Service.
-    Produces standalone responsive HTML5 dashboard with embedded charts, KPI summary cards,
-    and filterable data table. Works 100% offline with zero CDN dependencies.
-    """
-    try:
-        df = pd.read_csv(io.BytesIO(file_bytes))
-    except Exception:
-        df = pd.DataFrame({"month": ["Jan", "Feb", "Mar", "Apr"], "revenue": [12000, 18500, 24000, 31000], "units": [120, 180, 230, 290]})
-
-    total_records = len(df)
+    """Generate a standalone HTML dashboard with escaped untrusted dataset content."""
+    df = _read_csv_strict(file_bytes, filename)
+    display_name = Path(filename.replace("\\", "/")).name
     numeric_cols = df.select_dtypes(include=["number"]).columns.tolist()
-    primary_metric = numeric_cols[0] if numeric_cols else "count"
-    metric_sum = float(df[primary_metric].sum()) if numeric_cols else float(total_records)
-    metric_avg = float(df[primary_metric].mean()) if numeric_cols else 0.0
+    primary_metric = str(numeric_cols[0]) if numeric_cols else "count"
+    if numeric_cols:
+        series = df[primary_metric].dropna()
+        metric_sum = float(series.sum()) if len(series) else 0.0
+        metric_avg = float(series.mean()) if len(series) else 0.0
+    else:
+        metric_sum = float(len(df))
+        metric_avg = float(len(df))
 
     kpis = {
-        "total_records": total_records,
+        "total_records": int(len(df)),
         "primary_metric_name": primary_metric,
         "total_volume": round(metric_sum, 2),
         "average_volume": round(metric_avg, 2),
-        "columns_count": len(df.columns),
+        "columns_count": int(len(df.columns)),
     }
-    safe_relative_write(workspace, "kpi_metrics.json", json.dumps(kpis, indent=2))
+    safe_relative_write(workspace, "kpi_metrics.json", json.dumps(kpis, indent=2, allow_nan=False))
 
-    # Generate interactive HTML5 dashboard
-    html_content = f"""<!DOCTYPE html>
+    esc = lambda value: html.escape(str(value), quote=True)
+    table_headers = "".join(f"<th>{esc(c)}</th>" for c in df.columns[:8])
+    table_rows: list[str] = []
+    for _, row in df.head(50).iterrows():
+        cells = "".join(f"<td>{esc(row[c])}</td>" for c in df.columns[:8])
+        table_rows.append(f"<tr>{cells}</tr>")
+    table_body = "".join(table_rows)
+    safe_metric = esc(primary_metric)
+    safe_filename = esc(display_name)
+    html_content = f'''<!DOCTYPE html>
 <html lang="en">
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Executive Interactive Dashboard - {filename}</title>
+<title>Executive Interactive Dashboard - {safe_filename}</title>
 <style>
-  :root {{
-    --bg-primary: #0f172a;
-    --bg-card: #1e293b;
-    --text-primary: #f8fafc;
-    --text-secondary: #94a3b8;
-    --accent: #38bdf8;
-    --border: #334155;
-    --card-radius: 12px;
-  }}
-  body {{
-    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
-    background-color: var(--bg-primary);
-    color: var(--text-primary);
-    margin: 0;
-    padding: 24px;
-  }}
-  .container {{ max-width: 1200px; margin: 0 auto; }}
-  header {{ display: flex; justify-content: space-between; align-items: center; border-bottom: 1px solid var(--border); padding-bottom: 16px; margin-bottom: 24px; }}
-  h1 {{ font-size: 24px; font-weight: 700; margin: 0; }}
-  .tag {{ background: rgba(56, 189, 248, 0.15); color: var(--accent); padding: 4px 10px; border-radius: 6px; font-size: 13px; font-weight: 600; }}
-  .grid {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 20px; margin-bottom: 30px; }}
-  .kpi-card {{ background: var(--bg-card); border: 1px solid var(--border); border-radius: var(--card-radius); padding: 20px; }}
-  .kpi-label {{ font-size: 13px; text-transform: uppercase; letter-spacing: 0.05em; color: var(--text-secondary); margin-bottom: 8px; }}
-  .kpi-val {{ font-size: 28px; font-weight: 700; color: #fff; }}
-  .card {{ background: var(--bg-card); border: 1px solid var(--border); border-radius: var(--card-radius); padding: 24px; margin-bottom: 24px; }}
-  .search-box {{ width: 100%; box-sizing: border-box; background: #0f172a; border: 1px solid var(--border); border-radius: 8px; color: #fff; padding: 10px 14px; font-size: 14px; margin-bottom: 16px; }}
-  table {{ width: 100%; border-collapse: collapse; font-size: 14px; }}
-  th, td {{ padding: 10px 12px; text-align: left; border-bottom: 1px solid var(--border); }}
-  th {{ color: var(--text-secondary); font-weight: 600; }}
-  tr:hover {{ background-color: rgba(255, 255, 255, 0.03); }}
-  .chart-bar {{ height: 24px; background: var(--accent); border-radius: 4px; display: inline-block; }}
+:root {{ --bg-primary:#0f172a; --bg-card:#1e293b; --text-primary:#f8fafc; --text-secondary:#94a3b8; --accent:#38bdf8; --border:#334155; }}
+body {{ font-family:Arial,sans-serif;background:var(--bg-primary);color:var(--text-primary);margin:0;padding:24px; }}
+.container {{ max-width:1200px;margin:0 auto; }}
+header {{ display:flex;justify-content:space-between;align-items:flex-start;border-bottom:1px solid var(--border);padding-bottom:16px;margin-bottom:24px; }}
+.grid {{ display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:16px;margin-bottom:24px; }}
+.card {{ background:var(--bg-card);border:1px solid var(--border);border-radius:12px;padding:20px; }}
+.label {{ color:var(--text-secondary);font-size:12px;text-transform:uppercase; }}
+.value {{ font-size:27px;font-weight:700;margin-top:8px; }}
+input {{ width:100%;box-sizing:border-box;padding:12px;border-radius:8px;margin:12px 0;background:#0f172a;color:#fff;border:1px solid var(--border); }}
+table {{ width:100%;border-collapse:collapse; }}
+th,td {{ text-align:left;padding:9px;border-bottom:1px solid var(--border);overflow-wrap:anywhere; }}
 </style>
 </head>
-<body>
-<div class="container">
-  <header>
-    <div>
-      <h1>Interactive Executive Dashboard</h1>
-      <p style="color: var(--text-secondary); margin: 4px 0 0 0; font-size: 14px;">Source: {filename} · Automated Delivery</p>
-    </div>
-    <span class="tag">Verified Autonomous Build</span>
-  </header>
-
-  <div class="grid">
-    <div class="kpi-card">
-      <div class="kpi-label">Total Records</div>
-      <div class="kpi-val">{total_records:,}</div>
-    </div>
-    <div class="kpi-card">
-      <div class="kpi-label">Total {primary_metric.capitalize()}</div>
-      <div class="kpi-val">{metric_sum:,.1f}</div>
-    </div>
-    <div class="kpi-card">
-      <div class="kpi-label">Average {primary_metric.capitalize()}</div>
-      <div class="kpi-val">{metric_avg:,.1f}</div>
-    </div>
-    <div class="kpi-card">
-      <div class="kpi-label">Monitored Attributes</div>
-      <div class="kpi-val">{len(df.columns)}</div>
-    </div>
-  </div>
-
-  <div class="card">
-    <h2 style="font-size: 18px; margin-top: 0;">Interactive Data Explorer</h2>
-    <input type="text" id="searchInput" class="search-box" placeholder="Filter records in real-time..." onkeyup="filterTable()">
-    <div style="overflow-x: auto;">
-      <table id="dataTable">
-        <thead>
-          <tr>
-            {"".join(f"<th>{c}</th>" for c in df.columns[:8])}
-          </tr>
-        </thead>
-        <tbody>
-          {"".join("<tr>" + "".join(f"<td>{row[c]}</td>" for c in df.columns[:8]) + "</tr>" for _, row in df.head(50).iterrows())}
-        </tbody>
-      </table>
-    </div>
-  </div>
-</div>
-
+<body><main class="container">
+<header><div><h1>Interactive Executive Dashboard</h1><p>Source: {safe_filename} · Generated from supplied CSV</p></div><span>SOLOEARN</span></header>
+<section class="grid">
+<div class="card"><div class="label">Total records</div><div class="value">{len(df):,}</div></div>
+<div class="card"><div class="label">Total {safe_metric}</div><div class="value">{metric_sum:,.2f}</div></div>
+<div class="card"><div class="label">Average {safe_metric}</div><div class="value">{metric_avg:,.2f}</div></div>
+<div class="card"><div class="label">Columns</div><div class="value">{len(df.columns)}</div></div>
+</section>
+<section class="card"><h2>Data explorer (first 50 rows)</h2><label for="searchInput">Filter rows</label><input id="searchInput" type="search" oninput="filterTable()" placeholder="Search visible rows">
+<div style="overflow-x:auto"><table id="dataTable"><thead><tr>{table_headers}</tr></thead><tbody>{table_body}</tbody></table></div></section>
+</main>
 <script>
 function filterTable() {{
-  var input = document.getElementById("searchInput");
-  var filter = input.value.toUpperCase();
-  var table = document.getElementById("dataTable");
-  var tr = table.getElementsByTagName("tr");
-  for (var i = 1; i < tr.length; i++) {{
-    var text = tr[i].textContent || tr[i].innerText;
-    if (text.toUpperCase().indexOf(filter) > -1) {{
-      tr[i].style.display = "";
-    }} else {{
-      tr[i].style.display = "none";
-    }}
-  }}
+  const filter = document.getElementById('searchInput').value.toLocaleUpperCase();
+  document.querySelectorAll('#dataTable tbody tr').forEach(row => {{
+    row.hidden = !row.textContent.toLocaleUpperCase().includes(filter);
+  }});
 }}
 </script>
-</body>
-</html>
-"""
+</body></html>'''
     safe_relative_write(workspace, "dashboard.html", html_content)
 
-    # User Guide
     guide = f"""# Executive Interactive Dashboard User Guide
 
-## Summary
-The generated `dashboard.html` is a standalone, offline-ready responsive dashboard created for `{filename}`.
-It runs locally in any standard web browser without server setup or third-party tracking scripts.
+The offline dashboard was generated from `{display_name}`.
 
-## Key Features
-- **Key Performance Indicators (KPIs):** Real-time aggregation of total volume and averages.
-- **Search & Filter:** Instant client-side text filtering across all records.
-- **Dark Theme:** High-contrast presentation optimized for executive reviews.
+- It displays record count and the first numeric column's sum and average.
+- The table previews up to 50 records and supports client-side text filtering.
+- Validate the metric selection and business meaning before sharing with a client.
 """
     safe_relative_write(workspace, "dashboard_user_guide.md", guide)
-
     deliverables = ["dashboard.html", "kpi_metrics.json", "dashboard_user_guide.md"]
     package_deliverables_zip(workspace, deliverables)
     return deliverables
 
 
-def execute_business_automation_service(workspace: Path, filename: str, task_title: str) -> list[str]:
-    """
-    Executes Tier 2 Business Automation Service.
-    Produces robust Python workflow scripts with configuration and unit tests.
-    """
-    script_content = f'''"""
-Automated Business Workflow Script
-Generated by SOLOEARN Business Automation Engine
-Task: {task_title}
-"""
-from __future__ import annotations
+def execute_business_automation_service(
+    workspace: Path,
+    file_bytes: bytes,
+    filename: str,
+    task_title: str,
+) -> list[str]:
+    """Create and run a concrete CSV reconciliation automation, not a no-op scaffold."""
+    source_df = _normalise_columns(_read_csv_strict(file_bytes, filename))
+    input_rows = int(len(source_df))
+    duplicate_rows = int(source_df.duplicated().sum())
+    result_df = source_df.drop_duplicates().copy()
+    result_df = _sanitize_export_frame(result_df)
+    safe_relative_write(workspace, "reconciled_output.csv", result_df.to_csv(index=False))
 
+    summary = {
+        "workflow": "csv_reconciliation",
+        "source_filename": Path(filename.replace("\\", "/")).name,
+        "input_rows": input_rows,
+        "output_rows": int(len(result_df)),
+        "duplicates_removed": duplicate_rows,
+        "columns": [str(c) for c in source_df.columns],
+        "status": "completed",
+    }
+    safe_relative_write(workspace, "automation_summary.json", json.dumps(summary, indent=2, allow_nan=False))
+
+    automation_code = '''from __future__ import annotations
 import argparse
 import json
-import logging
-import sys
+import re
 from pathlib import Path
+import pandas as pd
 
-logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 
-def execute_workflow(config_path: str = "config.json") -> int:
-    cfg_file = Path(config_path)
-    if not cfg_file.exists():
-        logging.error(f"Configuration file not found: {{cfg_file}}")
-        return 1
+def normalise_headers(columns):
+    names = []
+    for index, col in enumerate(columns, start=1):
+        name = re.sub(r"[^a-z0-9_]+", "_", str(col).strip().lower()).strip("_") or f"column_{index}"
+        names.append(name)
+    if len(set(names)) != len(names):
+        raise ValueError("Header normalization created duplicate column names")
+    return names
 
-    with open(cfg_file, "r", encoding="utf-8") as f:
-        config = json.load(f)
 
-    logging.info(f"Loaded config: {{config.get('workflow_name', 'Default Workflow')}}")
-    logging.info("Executing automated reconciliation steps...")
-    
-    # Process actions defined in config
-    batch_size = config.get("batch_size", 100)
-    logging.info(f"Processing in batches of {{batch_size}} items. All tasks verified.")
-    return 0
+def sanitize_export_value(value):
+    if not isinstance(value, str):
+        return value
+    stripped = value.strip()
+    if not stripped or stripped[0] not in ("=", "+", "-", "@"):
+        return value
+    try:
+        float(stripped)
+        return value
+    except ValueError:
+        return value if value.startswith("'") else "'" + value
+
+
+def run_automation(input_path: str, output_path: str, summary_path: str = "automation_summary.json") -> dict:
+    source = Path(input_path)
+    if not source.is_file():
+        raise FileNotFoundError(f"Input CSV not found: {source}")
+    frame = pd.read_csv(source)
+    if frame.empty or len(frame.columns) == 0:
+        raise ValueError("Input CSV has no data rows or columns")
+    input_rows = len(frame)
+    frame.columns = normalise_headers(frame.columns)
+    duplicates_removed = int(frame.duplicated().sum())
+    frame = frame.drop_duplicates().copy()
+    for column in frame.select_dtypes(include=["object", "string"]).columns:
+        frame[column] = frame[column].map(sanitize_export_value)
+    destination = Path(output_path)
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    frame.to_csv(destination, index=False)
+    result = {
+        "input_rows": input_rows,
+        "output_rows": len(frame),
+        "duplicates_removed": duplicates_removed,
+        "columns": list(frame.columns),
+        "status": "completed",
+    }
+    Path(summary_path).write_text(json.dumps(result, indent=2), encoding="utf-8")
+    return result
+
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Run Business Workflow Automation")
-    parser.add_argument("--config", default="config.json", help="Path to config.json")
+    parser = argparse.ArgumentParser(description="Normalize CSV headers and remove duplicate rows")
+    parser.add_argument("--input", required=True, help="Path to a CSV file you are authorized to process")
+    parser.add_argument("--output", default="reconciled_output.csv")
+    parser.add_argument("--summary", default="automation_summary.json")
     args = parser.parse_args()
-    sys.exit(execute_workflow(args.config))
+    run_automation(args.input, args.output, args.summary)
 '''
-    safe_relative_write(workspace, "automation.py", script_content)
+    safe_relative_write(workspace, "automation.py", automation_code)
 
     config_content = json.dumps(
         {
-            "workflow_name": task_title,
-            "version": "1.0.0",
-            "batch_size": 250,
-            "auto_retry": True,
-            "max_retries": 3,
-            "notification_email": "admin@example.com",
+            "workflow_name": "CSV Reconciliation",
+            "task_title": str(task_title)[:160],
+            "version": "1.1.0",
+            "operations": ["normalize_headers", "remove_exact_duplicate_rows", "write_reconciled_csv", "write_summary_json"],
+            "input_filename_example": "client_data.csv",
+            "default_output": "reconciled_output.csv",
         },
         indent=2,
+        ensure_ascii=False,
     )
     safe_relative_write(workspace, "config.json", config_content)
+    readme = """# CSV Reconciliation Automation
 
-    readme = f"""# Business Automation Workflow: {task_title}
+This workflow performs only the documented, deterministic operations:
+1. Reads a supplied CSV file.
+2. Normalizes column names to lowercase snake_case.
+3. Removes exact duplicate rows.
+4. Writes a reconciled CSV and a JSON summary.
 
-## Execution
-Run the automated workflow with:
-```bash
-python automation.py --config config.json
-```
-
-## Configuration
-Modify `config.json` to customize batch sizes, retry counts, and target destinations.
+Run it with `python automation.py --input your_authorized_file.csv --output reconciled_output.csv`.
+It does not connect to external services, send messages, or modify source files.
 """
     safe_relative_write(workspace, "README.md", readme)
-
-    test_code = '''from __future__ import annotations
-
+    test_code = '''from pathlib import Path
+import tempfile
 import unittest
-from pathlib import Path
-from automation import execute_workflow
+import pandas as pd
+from automation import run_automation
 
-class TestBusinessAutomation(unittest.TestCase):
-    def test_workflow_execution(self):
-        ret = execute_workflow("config.json")
-        self.assertEqual(ret, 0)
+class TestCSVReconciliation(unittest.TestCase):
+    def test_deduplicates_and_reports_counts(self):
+        with tempfile.TemporaryDirectory() as folder:
+            base = Path(folder)
+            source = base / "input.csv"
+            output = base / "output.csv"
+            summary = base / "summary.json"
+            pd.DataFrame({"Order ID": [1, 1, 2], "Amount": [10, 10, 20]}).to_csv(source, index=False)
+            result = run_automation(str(source), str(output), str(summary))
+            self.assertEqual(result["input_rows"], 3)
+            self.assertEqual(result["output_rows"], 2)
+            self.assertEqual(result["duplicates_removed"], 1)
+            self.assertEqual(list(pd.read_csv(output).columns), ["order_id", "amount"])
 
 if __name__ == "__main__":
     unittest.main()
 '''
     safe_relative_write(workspace, "test_automation.py", test_code)
 
-    deliverables = ["automation.py", "config.json", "README.md", "test_automation.py"]
+    # Execute the trusted in-process transformation above against the supplied file.
+    deliverables = [
+        "reconciled_output.csv",
+        "automation_summary.json",
+        "automation.py",
+        "config.json",
+        "README.md",
+        "test_automation.py",
+    ]
     package_deliverables_zip(workspace, deliverables)
     return deliverables

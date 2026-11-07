@@ -3,7 +3,7 @@ from __future__ import annotations
 import math
 import sqlite3
 from contextlib import contextmanager
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any, Generator
 
 from core.config import DB_PATH, ensure_directories
@@ -52,6 +52,12 @@ def init_db() -> None:
                 score REAL NOT NULL DEFAULT 0,
                 content_hash TEXT DEFAULT '',
                 created_at TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS execution_claims (
+                opportunity_id INTEGER PRIMARY KEY,
+                claimed_at TEXT NOT NULL,
+                FOREIGN KEY(opportunity_id) REFERENCES opportunities(id) ON DELETE CASCADE
             );
 
             CREATE TABLE IF NOT EXISTS tasks (
@@ -376,7 +382,23 @@ def add_revenue(
     if status not in {"expected", "invoiced", "paid", "cancelled"}:
         raise ValueError("Invalid revenue status")
 
-    paid_at = utc_now() if status == "paid" else None
+    if status == "paid":
+        if opportunity_id is not None:
+            with connect() as conn:
+                opp_row = conn.execute("SELECT status FROM opportunities WHERE id=?", (opportunity_id,)).fetchone()
+            if opp_row is None:
+                raise ValueError("Referenced opportunity does not exist")
+            if opp_row["status"] not in {"submitted_by_owner", "won", "invoiced", "paid"}:
+                raise ValueError(
+                    f"Cannot record confirmed 'paid' revenue for an opportunity in status '{opp_row['status']}'. "
+                    "Work must be submitted by the owner first."
+                )
+        raise ValueError(
+            "Direct paid-revenue entries are disabled. Record a paid receipt through the invoice workflow "
+            "after independently checking the bank statement and confirming the payment reference."
+        )
+
+    paid_at = None
     with connect() as conn:
         if opportunity_id is not None:
             opp_row = conn.execute("SELECT status FROM opportunities WHERE id=?", (opportunity_id,)).fetchone()
@@ -543,41 +565,66 @@ def list_proposals() -> list[dict[str, Any]]:
 # Milestone 5: Revenue Operations, Invoicing, Revisions & Resilient Concurrency
 
 def claim_opportunity_for_execution(opportunity_id: int) -> bool:
-    """
-    Atomically claims an opportunity for execution using an atomic SQL UPDATE.
-    Transitions status from 'approved_for_work' to 'in_progress'.
-    Returns True if successfully claimed; False if already claimed or invalid state.
-    Guarantees thread-safe and process-safe concurrency.
-    """
+    """Atomically acquire a per-opportunity execution lease across threads/processes."""
     with connect() as conn:
-        cur = conn.execute(
-            """UPDATE opportunities 
-               SET status = 'in_progress' 
-               WHERE id = ? AND status = 'approved_for_work' AND source_permitted = 1""",
+        conn.execute("BEGIN IMMEDIATE")
+        opp = conn.execute(
+            "SELECT id, status, source_permitted FROM opportunities WHERE id=?",
             (opportunity_id,),
+        ).fetchone()
+        if opp is None or not opp["source_permitted"] or opp["status"] not in {"approved_for_work", "in_progress"}:
+            return False
+        cur = conn.execute(
+            "INSERT OR IGNORE INTO execution_claims(opportunity_id, claimed_at) VALUES (?, ?)",
+            (opportunity_id, utc_now()),
         )
-        claimed = cur.rowcount > 0
-    if claimed:
-        log_event("opportunity_claimed_for_execution", f"id={opportunity_id}")
-    return claimed
+        if cur.rowcount != 1:
+            return False
+        if opp["status"] == "approved_for_work":
+            conn.execute("UPDATE opportunities SET status='in_progress' WHERE id=?", (opportunity_id,))
+    log_event("opportunity_claimed_for_execution", f"id={opportunity_id}")
+    return True
 
 
-def recover_interrupted_tasks() -> list[int]:
+def release_opportunity_execution_claim(opportunity_id: int) -> None:
+    """Release the execution lease after QA/failure handling is finished."""
+    with connect() as conn:
+        cur = conn.execute("DELETE FROM execution_claims WHERE opportunity_id=?", (opportunity_id,))
+    if cur.rowcount:
+        log_event("opportunity_execution_claim_released", f"id={opportunity_id}")
+
+
+def recover_interrupted_tasks(stale_after_seconds: int = 6 * 60 * 60) -> list[int]:
+    """Flag genuinely interrupted work while leaving fresh execution leases alone.
+
+    A running worker holds an execution_claims row. The separate discovery
+    scheduler must not mistake that live task for a crash. A stale lease is
+    reclaimed only after the configured grace period (six hours by default);
+    tasks with no lease are legacy/interrupted records and are flagged for review.
     """
-    Identifies tasks or opportunities left in an inconsistent/in_progress state
-    due to process interruption or crash, and recovers them safely to 'approved_for_work'.
-    """
+    if isinstance(stale_after_seconds, bool) or not isinstance(stale_after_seconds, int) or stale_after_seconds < 60:
+        raise ValueError("stale_after_seconds must be an integer of at least 60 seconds")
+    stale_before = (datetime.now(timezone.utc) - timedelta(seconds=stale_after_seconds)).isoformat(timespec="seconds")
     recovered_opps: list[int] = []
     with connect() as conn:
+        conn.execute("BEGIN IMMEDIATE")
         rows = conn.execute(
-            """SELECT o.id FROM opportunities o
+            """SELECT DISTINCT o.id FROM opportunities o
                JOIN tasks t ON t.opportunity_id = o.id
-               WHERE o.status = 'in_progress' AND t.status IN ('created', 'in_progress', 'qa_testing', 'revising')"""
+               LEFT JOIN execution_claims c ON c.opportunity_id = o.id
+               WHERE o.status = 'in_progress'
+                 AND t.status IN ('created', 'in_progress', 'qa_testing', 'revising')
+                 AND (c.opportunity_id IS NULL OR c.claimed_at <= ?)""",
+            (stale_before,),
         ).fetchall()
-        for r in rows:
-            opp_id = int(r["id"])
+        for row in rows:
+            opp_id = int(row["id"])
+            conn.execute("DELETE FROM execution_claims WHERE opportunity_id = ?", (opp_id,))
             conn.execute("UPDATE opportunities SET status = 'approved_for_work' WHERE id = ?", (opp_id,))
-            conn.execute("UPDATE tasks SET status = 'needs_manual_review', notes = 'Interrupted execution recovered on startup' WHERE opportunity_id = ?", (opp_id,))
+            conn.execute(
+                "UPDATE tasks SET status = 'needs_manual_review', notes = 'Interrupted execution recovered; owner review required' WHERE opportunity_id = ? AND status IN ('created', 'in_progress', 'qa_testing', 'revising')",
+                (opp_id,),
+            )
             recovered_opps.append(opp_id)
     if recovered_opps:
         log_event("crash_recovery_executed", f"recovered_opps={recovered_opps}")
@@ -606,33 +653,84 @@ def create_invoice(
     due_days: int = 14,
     notes: str = "",
 ) -> dict[str, Any]:
-    if not client_name.strip():
+    client = str(client_name or "").strip()
+    if not client:
         raise ValueError("Client name cannot be empty")
+    if isinstance(amount_subtotal, bool) or isinstance(tax_rate, bool) or isinstance(due_days, bool):
+        raise ValueError("Subtotal, tax rate and due days must be numeric values, not booleans")
     try:
         subtotal = float(amount_subtotal)
-    except (ValueError, TypeError):
-        raise ValueError("Subtotal must be a valid number")
+        tax_rate_value = float(tax_rate)
+        due_days_number = float(due_days)
+    except (ValueError, TypeError, OverflowError) as exc:
+        raise ValueError("Subtotal, tax rate and due days must be valid numbers") from exc
+    if not math.isfinite(due_days_number) or not due_days_number.is_integer():
+        raise ValueError("Payment due days must be a finite whole number")
+    due_days_value = int(due_days_number)
     if not math.isfinite(subtotal) or subtotal <= 0:
         raise ValueError("Subtotal must be a finite number greater than zero")
+    if not math.isfinite(tax_rate_value) or not 0 <= tax_rate_value <= 28:
+        raise ValueError("Tax rate must be finite and between 0% and 28%")
+    if not 1 <= due_days_value <= 60:
+        raise ValueError("Payment due days must be between 1 and 60")
 
-    tax_rate = max(0.0, float(tax_rate))
-    tax_amount = round(subtotal * (tax_rate / 100.0), 2)
+    supported_tiers = {"data_analytics", "data_engineering", "interactive_dashboard", "business_automation"}
+    tier = str(service_tier or "").strip()
+    if tier not in supported_tiers:
+        raise ValueError(f"Unsupported service tier: {tier!r}")
+
+    tax_amount = round(subtotal * (tax_rate_value / 100.0), 2)
     amount_total = round(subtotal + tax_amount, 2)
 
     with connect() as conn:
-        opp = conn.execute("SELECT id, title, status FROM opportunities WHERE id=?", (opportunity_id,)).fetchone()
+        # Serialize invoice numbering and duplicate checks across concurrent callers.
+        conn.execute("BEGIN IMMEDIATE")
+        opp = conn.execute("SELECT id, title, status, source_permitted FROM opportunities WHERE id=?", (opportunity_id,)).fetchone()
         if opp is None:
             raise ValueError(f"Opportunity #{opportunity_id} not found")
-        if opp["status"] not in {"submitted_by_owner", "won", "invoiced", "submission_ready"}:
+        if not opp["source_permitted"]:
+            raise ValueError("Cannot invoice an opportunity from an unpermitted source")
+        if opp["status"] not in {"submitted_by_owner", "won"}:
             raise ValueError(
                 f"Cannot generate invoice for opportunity #{opportunity_id} in status '{opp['status']}'. "
-                "Deliverables must be completed and submitted first."
+                "The owner must submit the completed deliverable first."
             )
 
-        inv_num = generate_invoice_number()
+        active_invoice = conn.execute(
+            "SELECT invoice_number FROM invoices WHERE opportunity_id=? AND status <> 'cancelled' LIMIT 1",
+            (opportunity_id,),
+        ).fetchone()
+        if active_invoice:
+            raise ValueError(f"An active invoice ({active_invoice['invoice_number']}) already exists for this opportunity")
+
+        if task_id is None:
+            task_row = conn.execute(
+                """SELECT id, status, artifact_path FROM tasks
+                   WHERE opportunity_id=? AND status IN ('submission_ready', 'completed') AND artifact_path <> ''
+                   ORDER BY id DESC LIMIT 1""",
+                (opportunity_id,),
+            ).fetchone()
+        else:
+            task_row = conn.execute(
+                "SELECT id, opportunity_id, status, artifact_path FROM tasks WHERE id=? AND opportunity_id=?",
+                (task_id, opportunity_id),
+            ).fetchone()
+            if task_row is not None and (task_row["status"] not in {"submission_ready", "completed"} or not task_row["artifact_path"]):
+                task_row = None
+        if task_row is None:
+            raise ValueError("An associated QA-ready task with a deliverable artifact is required before invoicing")
+        task_id_value = int(task_row["id"])
+
+        year = datetime.now(timezone.utc).year
+        count_row = conn.execute(
+            "SELECT COUNT(*) FROM invoices WHERE invoice_number LIKE ?",
+            (f"INV-{year}-%",),
+        ).fetchone()
+        inv_num = f"INV-{year}-{int(count_row[0] or 0) + 1:04d}"
         now = utc_now()
-        due_at = datetime.fromisoformat(now).timestamp() + (due_days * 86400)
-        due_str = datetime.fromtimestamp(due_at, timezone.utc).isoformat(timespec="seconds")
+        due_str = datetime.fromtimestamp(
+            datetime.fromisoformat(now).timestamp() + (due_days_value * 86400), timezone.utc
+        ).isoformat(timespec="seconds")
 
         cur = conn.execute(
             """INSERT INTO invoices(
@@ -641,27 +739,15 @@ def create_invoice(
                 status, notes, issued_at, due_at
             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'INR', 'issued', ?, ?, ?)""",
             (
-                inv_num,
-                opportunity_id,
-                task_id,
-                client_name.strip()[:120],
-                service_tier.strip()[:60],
-                subtotal,
-                tax_rate,
-                tax_amount,
-                amount_total,
-                notes.strip()[:1000],
-                now,
-                due_str,
+                inv_num, opportunity_id, task_id_value, client[:120], tier[:60],
+                subtotal, tax_rate_value, tax_amount, amount_total,
+                str(notes or "").strip()[:1000], now, due_str,
             ),
         )
         inv_id = int(cur.lastrowid)
+        conn.execute("UPDATE opportunities SET status='invoiced' WHERE id=?", (opportunity_id,))
 
-        # Update opportunity to invoiced if eligible
-        if opp["status"] in {"submitted_by_owner", "won"}:
-            conn.execute("UPDATE opportunities SET status='invoiced' WHERE id=?", (opportunity_id,))
-
-    log_event("invoice_created", f"invoice={inv_num}; total={amount_total}; opp_id={opportunity_id}")
+    log_event("invoice_created", f"invoice={inv_num}; total={amount_total}; opp_id={opportunity_id}; task_id={task_id_value}")
     return get_invoice(inv_id)  # type: ignore[return-value]
 
 
@@ -698,10 +784,12 @@ def verify_invoice_payment(
     Requires owner confirmation checkbox, non-empty UTR/transaction reference,
     and exact amount matching invoice total.
     """
-    if not owner_confirmation:
+    if owner_confirmation is not True:
         raise ValueError("Payment verification requires explicit human owner confirmation")
-    if not payment_reference or not payment_reference.strip():
+    if not isinstance(payment_reference, str) or not payment_reference.strip():
         raise ValueError("Bank payment reference (UTR / Transaction ID) is required")
+    if isinstance(verified_amount, bool):
+        raise ValueError("Verified amount must be a numeric amount, not a boolean")
 
     try:
         amt = float(verified_amount)
@@ -712,11 +800,20 @@ def verify_invoice_payment(
         raise ValueError("Verified amount must be a finite number greater than zero")
 
     with connect() as conn:
+        # Acquire the SQLite write reservation before checking the reference.
+        # This prevents two concurrent verifications from reusing one UTR.
+        conn.execute("BEGIN IMMEDIATE")
         inv = conn.execute("SELECT * FROM invoices WHERE id=?", (invoice_id,)).fetchone()
         if inv is None:
             raise ValueError(f"Invoice #{invoice_id} not found")
-        if inv["status"] == "paid":
-            raise ValueError(f"Invoice #{invoice_id} is already marked as paid")
+        if inv["status"] not in {"issued", "payment_pending"}:
+            raise ValueError(f"Invoice #{invoice_id} is not awaiting payment (status: {inv['status']})")
+        duplicate_ref = conn.execute(
+            "SELECT id FROM invoices WHERE payment_reference=? AND status='paid' AND id<>? LIMIT 1",
+            (payment_reference.strip()[:120], invoice_id),
+        ).fetchone()
+        if duplicate_ref:
+            raise ValueError("This payment reference has already been used for another paid invoice")
 
         inv_total = float(inv["amount_total"])
         if abs(amt - inv_total) >= 0.01:

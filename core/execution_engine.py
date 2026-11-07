@@ -8,7 +8,7 @@ from typing import Any, Callable
 
 from core.analytics import create_analytics_bundle
 from core.config import safe_workspace_path
-from core.db import claim_opportunity_for_execution, connect, create_task, log_event, update_task_status
+from core.db import claim_opportunity_for_execution, connect, create_task, get_task, log_event, update_task_status
 from core.service_executors import (
     execute_business_automation_service,
     execute_dashboard_development_service,
@@ -129,6 +129,8 @@ class AutonomousExecutionEngine:
 
     def __init__(self, llm_call: Callable[[str, str], str] | None = None):
         self.llm_call = llm_call
+        # Exposed to the orchestrator so it only releases a lease this worker owns.
+        self.claim_acquired = False
 
     def execute_job(
         self,
@@ -152,11 +154,19 @@ class AutonomousExecutionEngine:
             if opp_row["status"] not in {"approved_for_work", "in_progress"}:
                 raise ValueError(f"Opportunity #{opp_id} is not approved for work (status: '{opp_row['status']}')")
 
-            # Concurrency protection: Atomic claim for execution
-            if task_id is None and opp_row["status"] == "approved_for_work":
-                claimed = claim_opportunity_for_execution(opp_id)
-                if not claimed:
-                    raise RuntimeError(f"Concurrency Lock Violation: Opportunity #{opp_id} is already currently executing.")
+            # Acquire a process-safe lease regardless of whether this is a fresh
+            # task or a retry of an interrupted task. A supplied task must belong
+            # to this opportunity and must be in a resumable state.
+            if task_id is not None:
+                existing_task = get_task(task_id)
+                if existing_task is None or existing_task.get("opportunity_id") != opp_id:
+                    raise ValueError("Supplied task_id does not belong to this opportunity")
+                if existing_task.get("status") not in {"created", "failed", "needs_manual_review", "in_progress"}:
+                    raise ValueError("Supplied task is not in a resumable state")
+            claimed = claim_opportunity_for_execution(opp_id)
+            if not claimed:
+                raise RuntimeError(f"Concurrency lock: opportunity #{opp_id} was already claimed by another worker.")
+            self.claim_acquired = True
         else:
             if not opportunity.get("source_permitted", False):
                 raise ValueError("Opportunity is from an unpermitted source")
@@ -165,7 +175,8 @@ class AutonomousExecutionEngine:
 
         opp_title = opportunity.get("title", Path(filename).name)
 
-        # Detect service tier
+        # Detect service tier. Never silently route an unknown requested service
+        # into the analytics executor: that could deliver the wrong work to a client.
         service_tier = opportunity.get("service_tier", "")
         combined_text = f"{opp_title.lower()} {opportunity.get('description', '').lower()}"
         if not service_tier:
@@ -177,6 +188,12 @@ class AutonomousExecutionEngine:
                 service_tier = "business_automation"
             else:
                 service_tier = "data_analytics"
+
+        supported_service_tiers = {
+            "data_analytics", "data_engineering", "interactive_dashboard", "business_automation"
+        }
+        if service_tier not in supported_service_tiers:
+            raise ValueError(f"Unsupported service tier: {service_tier!r}")
 
         if task_id is None:
             task_id = create_task(
@@ -208,7 +225,7 @@ class AutonomousExecutionEngine:
             elif service_tier == "interactive_dashboard":
                 deliverables = execute_dashboard_development_service(workspace, file_bytes, filename)
             elif service_tier == "business_automation":
-                deliverables = execute_business_automation_service(workspace, filename, opp_title)
+                deliverables = execute_business_automation_service(workspace, file_bytes, filename, opp_title)
             else:
                 # Default Tier 1: CSV Analytics Bundle
                 zip_artifact = create_analytics_bundle(

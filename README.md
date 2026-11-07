@@ -1,10 +1,10 @@
-# SOLOEARN v0.1 — Private Local Workbench
+# SOLOEARN v0.5.3 — Private Local Workbench
 
 A local-first, single-owner prototype for organizing legitimate paid-work opportunities and producing a first repeatable deliverable: a CSV business-analysis pack.
 
-**Important:** this is not AGI and it does not guarantee income. It is not an unattended earning bot. Version 0.1 does not scrape job sites, send proposals, accept contracts, submit deliverables, make purchases, move money, log in to a bank, or access personal files. Human approval is required for external actions.
+**Important:** this is not AGI and it does not guarantee income. It is not an unattended earning bot. This release does not scrape job sites, send proposals, accept contracts, submit deliverables, make purchases, move money, log in to a bank, or access personal files. Human approval is required for external actions.
 
-## What works in v0.1
+## What works in v0.5.3
 
 - Local Streamlit dashboard bound to `127.0.0.1` only.
 - SQLite database for opportunities, tasks, revenue entries and an audit log.
@@ -20,7 +20,7 @@ A local-first, single-owner prototype for organizing legitimate paid-work opport
   - Decomposes approved opportunity requirements into structured 7-step work plans.
   - Fail-closed execution gate: reloads authoritative opportunity from SQLite, rejects unknown/unapproved/unpermitted jobs, and propagates state-transition errors.
   - Generates full deliverables in task-scoped isolated workspaces (`workspaces/task_XXXX/`).
-  - Python handles calculations, transformations, and Excel compilation; local Qwen/Ollama interprets nuance.
+  - Python handles calculations, transformations, and Excel compilation. Optional local Qwen/Ollama is used only for aggregate report observations; execution planning and proposals are deterministic.
 - **Independent Quality Assurance (QA) Agent (Milestone 3 & 3.2 Hardened)**:
   - 6-suite verification: file existence, openpyxl workbook structure, comprehensive all-sheet formula injection protection, mathematical identity checks, PNG binary validation, HTML presentation integrity, archive allow-list health.
   - Verifies workbook/CSV dimensions, checks profile column completeness, and requires complete numeric summary rows with independently recalculated means.
@@ -38,15 +38,14 @@ A local-first, single-owner prototype for organizing legitimate paid-work opport
   - Capability Matcher (`core/capability_matcher.py`): scores scope against SOLOEARN's verified deliverable capabilities (CSV/Excel analytics, data cleaning, charts, HTML summaries) and penalizes/rejects unsupported domains (mobile apps, crypto, video editing, copywriting).
   - Risk & Fraud Analyzer (`core/risk_analyzer.py`): flags off-platform communication schemes (Telegram, WhatsApp, Skype), payment scams (crypto, gift cards, check deposits), rate anomalies, and suspicious TLDs.
   - Multi-level deduplication: canonicalizes URLs and hashes title/description via SHA-256 fingerprinting.
-  - Tailored Proposal Generator (`core/proposal_generator.py`): produces honest, professional proposals referencing the verified deliverable bundle (`business_analysis.xlsx`, `cleaned_data.csv`, `report.html`, charts) and 6-suite QA guarantee with zero hallucinated promises.
+  - Tailored Proposal Generator (`core/proposal_generator.py`): produces honest, professional proposals referencing the verified deliverable bundle (`business_analysis.xlsx`, `cleaned_data.csv`, `report.html`, charts) and six automated QA categories; automated checks do not guarantee client acceptance or error-free work.
   - Explicit Human Authorization Gate: proposals start as `draft` and strictly require owner review and checkbox authorization before submission.
-- **Autonomous Revenue Operations, Invoicing & Multi-Service Execution (Milestone 5)**:
-  - **5 Production Service Tiers**:
-    1. *Tier 1: Data Analytics & Excel Pack* (₹5,000) — multi-tab Excel workbooks, statistical profiles, distribution charts, executive HTML presentations.
-    2. *Tier 2: Data Engineering & Automated Pipelines* (₹15,000) — cleaned datasets, schema manifests, data dictionaries, production Python ETL scripts (`pipeline.py`), and test suites.
-    3. *Tier 3: Executive Interactive HTML5 Dashboards* (₹20,000) — standalone offline-ready HTML5 dashboards with responsive layouts, real-time client-side search, KPI metric cards, and SVG visuals.
-    4. *Tier 2: Business Process Automation* (₹15,000) — modular Python automation scripts with JSON configs, error handling, logging, and unit tests.
-    5. *Tier 1/2: Software Automation Tools* (₹10,000-₹15,000) — command-line utilities with arg parsing, validation, and documentation.
+- **Revenue Operations & Multi-Service Execution (Milestone 5)**:
+  - **4 currently implemented service workflows** (the catalog prices below are illustrative starting assumptions, not verified market rates or guaranteed sales):
+    1. *Data Analytics & Excel Pack* (assumed ₹5,000) — multi-tab Excel workbook, statistical profile, charts, and executive HTML report.
+    2. *Data Engineering & CSV Pipeline Pack* (assumed ₹15,000) — cleaned dataset, schema manifest, data dictionary, reusable Python pipeline, and test file.
+    3. *Interactive HTML Dashboard Pack* (assumed ₹20,000) — offline-ready HTML dashboard with KPI cards, escaped table data, and client-side filtering.
+    4. *CSV Reconciliation Automation Pack* (assumed ₹15,000) — a real deterministic CSV workflow that normalizes headers, removes exact duplicate rows, writes a reconciled CSV, and emits a JSON summary. It is not a general-purpose business process automation platform.
   - **SSRF & Security Hardening**:
     - Comprehensive DNS resolution checks resolving all IPv4/IPv6 addresses to reject private, loopback, link-local, and reserved subnets.
     - Custom redirect handler `SafeSSRFRedirectHandler` blocking 301/302 redirects to unsafe or internal destinations.
@@ -55,17 +54,19 @@ A local-first, single-owner prototype for organizing legitimate paid-work opport
     - Atomic SQL claims (`claim_opportunity_for_execution`) preventing race conditions during concurrent execution requests.
     - SQLite WAL mode with 5,000ms busy timeout.
   - **Client Invoicing & Payment Verification Workflow**:
-    - Generates formal print-ready HTML invoices (`INV-YYYY-XXXX.html`) with line items, tax, and audit guarantee.
-    - Strict payment receipt verification requiring owner confirmation checkbox, bank reference (UTR/Transaction ID), and exact amount matching before revenue is marked paid.
-  - **Unattended Daemon Scheduler & Crash Recovery**:
-    - Periodic background discovery polling.
-    - Automatic crash recovery restoring interrupted tasks on startup.
+    - Generates formal print-ready HTML invoices (`INV-YYYY-XXXX.html`) with line items and a user-entered tax calculation; confirm applicable invoice requirements before issuing.
+    - Owner-attested payment receipt recording requiring explicit confirmation, a bank reference (UTR/Transaction ID), and exact amount matching; this is not an automatic bank or UTR verification integration.
+  - **Background Discovery Scheduler (optional separate process)**:
+    - Recurring polling of active, permitted discovery sources when `START_SOLOEARN_SCHEDULER.bat` is running.
+    - Interrupted jobs are reset to a safe state and flagged for manual review; they are not automatically resumed.
     - Health heartbeat file (`data/daemon_heartbeat.json`).
-  - **Revenue Target Optimizer (Goal: ≥ ₹1,00,000 / Month)**:
-    - Real-time Month-to-Date (MTD) tracking, gap analysis, and operational recommendations.
-    - Proven service mix: 8 Tier-1 jobs (₹40,000) + 3 Tier-2 jobs (₹45,000) + 1 Tier-3 job (₹20,000) = ₹1,05,000/month.
-    - Hourly yield ranking sorting opportunities by risk-adjusted ₹/hour.
-- Optional local Ollama connection for proposal drafting and aggregate-only report observations.
+    - This scheduler does not autonomously execute client jobs, accept contracts, send proposals, submit work, or process payments.
+  - **Gross Paid Revenue Target Optimizer (illustrative goal: ₹1,00,000 / month)**:
+    - Tracks owner-confirmed gross payments recorded in the local ledger and displays outstanding invoices and uncontracted pipeline separately.
+    - Illustrative billing mix: 8 analytics jobs (₹40,000) + 3 data engineering jobs (₹45,000) + 1 dashboard job (₹20,000) = ₹1,05,000 gross billed, assuming those prices and customer demand.
+    - This is arithmetic only—not validated market demand, a capacity guarantee, net profit, take-home income, or a promise that the system will reach the target.
+    - Hourly yield ranking is an estimate based on supplied opportunity data, not a payment probability model trained on historical outcomes.
+- Optional local Ollama connection for aggregate-only report observations. Proposal drafts are deterministic templates; the local model is not used to create external proposal claims.
 - CSV workbench that creates:
   - `business_analysis.xlsx` (cleaned data, data-quality profile, numeric summary)
   - `cleaned_data.csv`
@@ -74,12 +75,12 @@ A local-first, single-owner prototype for organizing legitimate paid-work opport
   - `report.html`
   - simple charts in `charts/`
   - `deliverables.zip`
-- A revenue ledger. Only manually mark revenue as `paid` after verifying receipt.
+- A revenue ledger. Payment receipt is owner-attested after an independent bank-statement check; the app does not connect to bank accounts or independently verify UTRs.
 - Task workspace path checks; the app binds only to localhost.
 
 ## Hardware recommendation
 
-Your stated hardware is Ryzen 5, 16 GB RAM and an AMD GPU. Start CPU-first. GPU acceleration depends on the exact GPU SKU, VRAM/shared-memory amount, Windows driver and Ollama backend support. Current Ollama Windows ROCm support is limited to a published list of AMD Radeon RX 7000 cards and selected Radeon PRO cards; Vulkan can provide additional support, but actual compatibility varies. Don't assume that an integrated Radeon GPU will be used.
+Your stated hardware is AMD Ryzen 7 5700U, 16 GB RAM and integrated Radeon Vega graphics. Start CPU-first. GPU acceleration depends on the exact GPU SKU, VRAM/shared-memory amount, Windows driver and Ollama backend support. Current Ollama Windows ROCm support is limited to a published list of AMD Radeon RX 7000 cards and selected Radeon PRO cards; Vulkan can provide additional support, but actual compatibility varies. Don't assume that an integrated Radeon GPU will be used.
 
 Recommended first model: `qwen3:4b-instruct` (about 2.5 GB in the Ollama library). Keep context small (the app sets 4096 tokens) and close memory-heavy applications during inference. If 4B is too slow, use `qwen3:1.7b`; if it runs comfortably and the laptop has enough headroom, test `qwen3:8b` later. Model size on disk is not the same as total runtime RAM usage.
 
@@ -112,13 +113,10 @@ Recommended first model: `qwen3:4b-instruct` (about 2.5 GB in the Ollama library
    ollama list
    ```
 
-7. Start the private dashboard:
+7. Start the private dashboard with `START_SOLOEARN.bat` (this also launches the optional feed-polling scheduler in a separate minimized console), or run `scripts\run_windows.ps1` to start only the dashboard.
 
-   ```powershell
-   .\scripts\run_windows.ps1
-   ```
-
-8. Open <http://127.0.0.1:8501> in your browser. Keep the terminal window open while using it.
+8. Open <http://127.0.0.1:8501> in your browser. Keep the dashboard terminal open while using it.
+9. If you started only the dashboard with `run_windows.ps1`, you can start recurring authorized-feed polling separately with `START_SOLOEARN_SCHEDULER.bat`. Stop the scheduler console with Ctrl+C or close it. It polls feeds only; it does not accept jobs, execute paid work, or send proposals.
 
 Run the automated checks after setup:
 
@@ -126,7 +124,7 @@ Run the automated checks after setup:
 .\scripts\test_windows.ps1
 ```
 
-If Ollama is not installed or the model is not pulled, the workbench still runs. Proposal drafting uses a clearly labeled template fallback and reports use deterministic aggregate observations.
+If Ollama is not installed or the model is not pulled, the workbench still runs. Proposal drafting is always a deterministic, owner-editable template; reports use deterministic aggregate observations.
 
 ## Diagnose your exact AMD GPU
 
@@ -197,7 +195,7 @@ Use `sample_opportunities.csv` included in this folder:
    - Review flagged scam warnings and reasons before acting.
 6. Generate and Authorize Tailored Proposals:
    - Select a high-scoring discovered lead and click **Generate Tailored Proposal**.
-   - Review the proposal text referencing verified deliverable artifacts (`business_analysis.xlsx`, `report.html`, charts) and 6-suite QA guarantee.
+   - Review the proposal text referencing verified deliverable artifacts (`business_analysis.xlsx`, `report.html`, charts) and six automated QA categories, subject to client-specific review.
    - Check the **I have verified this proposal meets platform standards** checkbox and click **Authorize Proposal for Submission**.
    - Only authorized proposals advance to the ready queue; zero automatic or unsolicited sending.
 
@@ -216,13 +214,16 @@ Claude Pro can be used interactively through Claude Code for development if your
 - Follow each platform's rules for APIs, automation and outreach.
 - Back up the `data/` folder; it contains the local ledger.
 
-## Roadmap after v0.1
+## Verified scope and current limitations (v0.5.3)
 
-1. Add a reviewed intake format for allowed RSS/API feeds and direct inbound leads.
-2. Add repeatable service templates (monthly KPI report, spreadsheet cleanup, dashboard refresh).
-3. Add isolated per-task execution and regression tests.
-4. Add a client/project checklist, revision management and approval queue.
-5. Add platform integrations only where the platform explicitly supports them.
-6. Consider unattended execution only for narrow, reversible actions with strict limits and a tested rollback path.
+- Four deterministic service workflows are implemented: analytics, data engineering, interactive HTML dashboard generation, and CSV reconciliation automation. There is no separate fifth software-automation executor in this release.
+- The business automation service is intentionally limited to CSV header normalization, exact duplicate removal, and a summary report. It does not automate arbitrary external business systems.
+- The background scheduler polls permitted discovery sources and writes a heartbeat. It does not automatically execute paid jobs, contact leads, or restart interrupted work. Interrupted work is flagged for owner review.
+- Proposal authorization is a local approval state; there is no automatic proposal submission integration in this release.
+- Payment status is owner-attested from a bank statement. There is no bank API, account connection, automatic UTR validation, or money movement.
+- Invoice output is a local HTML draft. Confirm agreed scope, client identity, applicable tax registration, and legal invoice requirements before sending it; this app is not tax or legal advice.
+- Direct manual paid-revenue entries are disabled; a paid receipt is recorded only through owner-confirmed invoice payment workflow. This remains an owner attestation, not an independent bank verification.
+- The ₹1,00,000 goal is a **gross paid-revenue planning target**, not guaranteed earnings or net take-home income. Price assumptions and the sample service mix are not evidence of customer demand.
+- This project has not demonstrated a repeatable paying-customer acquisition channel or sustained monthly revenue. The first commercial validation milestone is to complete and collect payment for one genuine client project.
 
-Do not add auto-submission or payment automation before a real customer workflow has been validated end-to-end.
+Future work should prioritize evidence-backed client acquisition, independently validated service outputs, secure supported integrations, and operational monitoring. Do not enable automatic contract acceptance, proposal sending, or financial actions without platform authorization and tested safeguards.

@@ -4,6 +4,7 @@ import json
 import logging
 import os
 import time
+import threading
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -41,7 +42,7 @@ class AutonomousDaemonScheduler:
     Autonomous Daemon & Scheduler for Unattended Operation.
     Features:
     - Periodic discovery polling across permitted sources.
-    - Automatic crash recovery and interrupted job resumption on startup.
+    - Crash detection that flags interrupted tasks for owner review.
     - Persistent health heartbeat logging to data/daemon_heartbeat.json.
     - Safe execution bounded strictly to local permissions.
     """
@@ -55,7 +56,7 @@ class AutonomousDaemonScheduler:
         """Detects and safely recovers any tasks interrupted by an abrupt shutdown/crash."""
         recovered = recover_interrupted_tasks()
         if recovered:
-            logging.info(f"Crash recovery: restored {len(recovered)} interrupted opportunities: {recovered}")
+            logging.warning(f"Crash recovery: flagged {len(recovered)} interrupted opportunities for manual review: {recovered}")
         return recovered
 
     def poll_due_sources(self) -> dict[str, Any]:
@@ -123,6 +124,52 @@ class AutonomousDaemonScheduler:
         self.heartbeat_path.parent.mkdir(parents=True, exist_ok=True)
         self.heartbeat_path.write_text(json.dumps(heartbeat.to_dict(), indent=2), encoding="utf-8")
         return heartbeat
+
+    def run_forever(
+        self,
+        interval_seconds: int = 300,
+        stop_event: threading.Event | None = None,
+        max_cycles: int | None = None,
+    ) -> None:
+        """Run recurring discovery/maintenance cycles until stopped.
+
+        This scheduler polls authorized discovery sources and flags interrupted
+        tasks for manual review. It does NOT accept offers, execute client work,
+        send proposals, submit deliverables, or process payments.
+        """
+        if isinstance(interval_seconds, bool) or not isinstance(interval_seconds, int) or not 10 <= interval_seconds <= 86400:
+            raise ValueError("interval_seconds must be an integer between 10 and 86400")
+        if max_cycles is not None and (isinstance(max_cycles, bool) or not isinstance(max_cycles, int) or max_cycles < 1):
+            raise ValueError("max_cycles must be a positive integer when supplied")
+        self.is_running = True
+        completed = 0
+        try:
+            while not (stop_event and stop_event.is_set()):
+                try:
+                    self.run_once()
+                except Exception as exc:
+                    logging.exception("Scheduler cycle failed")
+                    heartbeat = DaemonHeartbeat(
+                        pid=os.getpid(),
+                        status="degraded",
+                        last_run_at=utc_now(),
+                        active_sources_count=len(list_discovery_sources(active_only=True)),
+                        interrupted_tasks_recovered=0,
+                        cycle_count=self.cycle_count,
+                        errors=[str(exc)[:500]],
+                    )
+                    self.heartbeat_path.parent.mkdir(parents=True, exist_ok=True)
+                    self.heartbeat_path.write_text(json.dumps(heartbeat.to_dict(), indent=2), encoding="utf-8")
+                completed += 1
+                if max_cycles is not None and completed >= max_cycles:
+                    break
+                if stop_event is not None:
+                    if stop_event.wait(interval_seconds):
+                        break
+                else:
+                    time.sleep(interval_seconds)
+        finally:
+            self.is_running = False
 
     def get_last_heartbeat(self) -> dict[str, Any] | None:
         """Reads the latest heartbeat from disk."""

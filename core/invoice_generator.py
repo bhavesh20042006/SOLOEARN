@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import html
+import re
 from pathlib import Path
 from typing import Any
 
@@ -11,16 +12,19 @@ def render_invoice_html(invoice: dict[str, Any], output_dir: Path | None = None)
     """
     Renders a formal, print-ready HTML invoice for the completed client work.
     """
-    inv_num = invoice["invoice_number"]
+    raw_invoice_number = str(invoice["invoice_number"])
+    if not re.fullmatch(r"INV-[0-9]{4}-[0-9]{4,8}", raw_invoice_number):
+        raise ValueError("Invoice number has an invalid format")
+    inv_num = html.escape(raw_invoice_number, quote=True)
     client = html.escape(str(invoice.get("client_name", "Valued Client")))
     tier = html.escape(str(invoice.get("service_tier", "Data Analytics & Engineering Service")).replace("_", " ").title())
     subtotal = float(invoice.get("amount_subtotal", 0.0))
     tax_rate = float(invoice.get("tax_rate", 0.0))
     tax_amount = float(invoice.get("tax_amount", 0.0))
     total = float(invoice.get("amount_total", 0.0))
-    status = invoice.get("status", "issued").upper()
-    issued_at = invoice.get("issued_at", "")[:10]
-    due_at = invoice.get("due_at", "")[:10]
+    status = html.escape(str(invoice.get("status", "issued")).upper(), quote=True)
+    issued_at = html.escape(str(invoice.get("issued_at", ""))[:10], quote=True)
+    due_at = html.escape(str(invoice.get("due_at", ""))[:10], quote=True)
     notes = html.escape(str(invoice.get("notes", "")))
     ref = html.escape(str(invoice.get("payment_reference", "")))
 
@@ -192,7 +196,7 @@ def render_invoice_html(invoice: dict[str, Any], output_dir: Path | None = None)
         <td>
           <strong>{tier}</strong>
           <div style="font-size: 12px; color: #64748b; margin-top: 4px;">
-            Production deliverable verified with 100% score by Independent QA Agent.
+            See the associated task QA report and client acceptance record for delivery details.
           </div>
         </td>
         <td style="text-align: center; color: #0f172a; font-weight: 600;">deliverables.zip</td>
@@ -216,9 +220,9 @@ def render_invoice_html(invoice: dict[str, Any], output_dir: Path | None = None)
   </div>
 
   <div class="payment-box">
-    <h4 style="margin: 0 0 8px 0; color: #0f172a; font-size: 13px;">Payment Instructions & Audit Guarantee</h4>
-    <p style="margin: 0 0 6px 0;">Please remit payment via direct Bank Transfer (NEFT/RTGS) or UPI transfer using reference <strong>{inv_num}</strong>.</p>
-    <p style="margin: 0; font-size: 12px; color: #64748b;">All deliverables are verified and protected by SOLOEARN's deterministic quality guarantee. Payment is recorded upon owner verification.</p>
+    <h4 style="margin: 0 0 8px 0; color: #0f172a; font-size: 13px;">Payment Instructions</h4>
+    <p style="margin: 0 0 6px 0;">Please use the payment method agreed with the client and quote invoice reference <strong>{inv_num}</strong>.</p>
+    <p style="margin: 0; font-size: 12px; color: #64748b;">This document is generated from the local work ledger. The owner must independently confirm receipt against their bank statement before recording payment. Confirm applicable tax and invoice requirements before issuing.</p>
   </div>
 </div>
 </body>

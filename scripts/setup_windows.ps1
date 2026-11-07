@@ -22,4 +22,4 @@ if (-not (Test-Path ".env")) {
 Write-Host "" 
 Write-Host "Setup complete." -ForegroundColor Green
 Write-Host "Next: run .\scripts\run_windows.ps1" -ForegroundColor Green
-Write-Host "Ollama is optional for v0.1. See README.md for local model setup." -ForegroundColor Yellow
+Write-Host "Ollama is optional for SOLOEARN v0.5.3. See README.md for local model setup." -ForegroundColor Yellow

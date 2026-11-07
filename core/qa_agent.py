@@ -163,27 +163,69 @@ class IndependentQAAgent:
         return checks
 
     def _run_business_automation_checks(self) -> list[QACheckResult]:
-        checks = []
-        required = ["automation.py", "config.json", "README.md", "deliverables.zip"]
-        missing = [f for f in required if not (self.workspace / f).exists() or (self.workspace / f).stat().st_size == 0]
+        checks: list[QACheckResult] = []
+        required = [
+            "automation.py",
+            "config.json",
+            "README.md",
+            "test_automation.py",
+            "reconciled_output.csv",
+            "automation_summary.json",
+            "deliverables.zip",
+        ]
+        missing = [f for f in required if not (self.workspace / f).is_file() or (self.workspace / f).stat().st_size == 0]
         checks.append(QACheckResult(
             check_name="automation_files",
             passed=len(missing) == 0,
-            summary="All automation files present" if not missing else f"Missing: {', '.join(missing)}",
+            summary="All reconciliation deliverables are present" if not missing else f"Missing: {', '.join(missing)}",
         ))
 
-        # Check Python automation syntax
         py_path = self.workspace / "automation.py"
-        if py_path.exists():
+        if py_path.is_file():
             try:
-                ast.parse(py_path.read_text(encoding="utf-8"))
-                checks.append(QACheckResult(check_name="python_syntax", passed=True, summary="Automation script parsed successfully with valid AST syntax."))
-            except SyntaxError as e:
-                checks.append(QACheckResult(check_name="python_syntax", passed=False, summary=f"Syntax error in automation.py: {e}"))
+                tree = ast.parse(py_path.read_text(encoding="utf-8"))
+                function_names = {node.name for node in ast.walk(tree) if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))}
+                has_real_worker = "run_automation" in function_names
+                checks.append(QACheckResult(
+                    check_name="automation_script_integrity",
+                    passed=has_real_worker,
+                    summary="Automation script exposes a real run_automation function" if has_real_worker else "Automation script is only a scaffold; run_automation is missing.",
+                ))
+            except (SyntaxError, UnicodeDecodeError) as exc:
+                checks.append(QACheckResult(check_name="automation_script_integrity", passed=False, summary=f"Invalid automation script: {exc}"))
         else:
-            checks.append(QACheckResult(check_name="python_syntax", passed=False, summary="automation.py does not exist."))
+            checks.append(QACheckResult(check_name="automation_script_integrity", passed=False, summary="automation.py missing."))
 
-        checks.append(self._check_archive_integrity(expected_files=["automation.py", "config.json", "README.md"]))
+        summary_path = self.workspace / "automation_summary.json"
+        output_path = self.workspace / "reconciled_output.csv"
+        if summary_path.is_file() and output_path.is_file():
+            try:
+                summary = json.loads(summary_path.read_text(encoding="utf-8"))
+                output = pd.read_csv(output_path)
+                input_rows = int(summary["input_rows"])
+                output_rows = int(summary["output_rows"])
+                duplicates_removed = int(summary["duplicates_removed"])
+                consistent = (
+                    summary.get("status") == "completed"
+                    and len(output) == output_rows
+                    and input_rows >= output_rows >= 0
+                    and input_rows - output_rows == duplicates_removed
+                    and list(output.columns) == summary.get("columns")
+                )
+                checks.append(QACheckResult(
+                    check_name="automation_output_consistency",
+                    passed=consistent,
+                    summary="Reconciled CSV matches the independently checked row-count summary" if consistent else "Reconciled CSV and automation summary are inconsistent.",
+                    details={"input_rows": input_rows, "output_rows": len(output), "duplicates_removed": duplicates_removed},
+                ))
+            except Exception as exc:
+                checks.append(QACheckResult(check_name="automation_output_consistency", passed=False, summary=f"Could not verify automation outputs: {exc}"))
+        else:
+            checks.append(QACheckResult(check_name="automation_output_consistency", passed=False, summary="Automation output CSV or summary JSON is missing."))
+
+        checks.append(self._check_archive_integrity(expected_files=[
+            "reconciled_output.csv", "automation_summary.json", "automation.py", "config.json", "README.md", "test_automation.py"
+        ]))
         return checks
 
     def _check_file_existence(self) -> QACheckResult:

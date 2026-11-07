@@ -479,14 +479,14 @@ with tabs[2]:
 
 # ----------------- Tab 3: Revenue Operations & Invoicing (M5) -----------------
 with tabs[3]:
-    st.subheader("🧾 Client Invoicing & Payment Verification (Milestone 5)")
-    st.caption("Generate formal business invoices from completed deliverables, track revisions, and verify bank receipts.")
+    st.subheader("🧾 Client Invoicing & Owner-Confirmed Receipts (Milestone 5)")
+    st.caption("Generate local invoice drafts and record owner-confirmed receipts. SOLOEARN does not connect to a bank or independently verify UTRs.")
 
     inv_col1, inv_col2 = st.columns([1, 1])
 
     with inv_col1:
         st.markdown("#### 📝 Create Formal Client Invoice")
-        submitted_opps = [o for o in list_opportunities() if o["status"] in {"submitted_by_owner", "won", "invoiced"}]
+        submitted_opps = [o for o in list_opportunities() if o["status"] in {"submitted_by_owner", "won"}]
         if submitted_opps:
             opp_choice = st.selectbox(
                 "Select Delivered Opportunity",
@@ -508,7 +508,8 @@ with tabs[3]:
                 due_days = st.number_input("Payment Due Within (Days)", min_value=1, max_value=60, value=14)
                 notes = st.text_area("Invoice Notes & Deliverable Reference", value="Deliverables verified and accepted via Independent QA audit.")
 
-                create_inv_btn = st.form_submit_button("Generate & Issue Official Invoice")
+                st.caption("This creates a local invoice draft. Confirm the client agreement and applicable tax/invoice requirements before sending it.")
+                create_inv_btn = st.form_submit_button("Generate Invoice Draft")
                 if create_inv_btn:
                     try:
                         inv = create_invoice(
@@ -530,7 +531,8 @@ with tabs[3]:
             st.info("No completed deliverables have been submitted by the owner yet. Submit a completed job in the Opportunity Pipeline first.")
 
     with inv_col2:
-        st.markdown("#### 💳 Verify Bank Payment & Confirm Revenue")
+        st.markdown("#### 💳 Record Owner-Confirmed Payment")
+        st.caption("SOLOEARN does not connect to your bank. This is an owner attestation after you independently check your bank statement.")
         pending_invoices = [i for i in list_invoices() if i["status"] in {"issued", "payment_pending"}]
         if pending_invoices:
             verify_inv_id = st.selectbox(
@@ -546,9 +548,9 @@ with tabs[3]:
                 st.write(f"**Billed To:** {target_inv['client_name']}")
                 payment_ref = st.text_input("Bank Reference / UTR Number / Transaction ID", placeholder="e.g. HDFC9876543210 / UPI-REF-4567")
                 received_amount = st.number_input("Verified Amount Credited (₹)", min_value=1.0, value=float(target_inv["amount_total"]), step=100.0)
-                owner_confirm = st.checkbox("I verify that I have independently logged in and confirmed receipt in my bank account", value=False)
+                owner_confirm = st.checkbox("I independently checked my bank statement and confirm this exact payment was received", value=False)
 
-                verify_btn = st.form_submit_button("Confirm Payment & Record Revenue", type="primary")
+                verify_btn = st.form_submit_button("Record Owner-Confirmed Receipt", type="primary")
                 if verify_btn:
                     try:
                         paid_inv = verify_invoice_payment(
@@ -605,14 +607,15 @@ with tabs[3]:
             st.caption("No active revision requests.")
 
     with rc2:
-        st.markdown("**Unattended Daemon Scheduler**")
+        st.markdown("**Background Discovery Scheduler**")
+        st.caption("For recurring feed polling, start START_SOLOEARN_SCHEDULER.bat. This scheduler discovers leads and flags interrupted tasks; it does not execute paid work or send proposals.")
         daemon = AutonomousDaemonScheduler()
         last_hb = daemon.get_last_heartbeat()
         if last_hb:
             st.write(f"**Status:** `{last_hb.get('status')}`")
             st.write(f"**Last Heartbeat:** {last_hb.get('last_run_at')}")
             st.write(f"**Active Sources Polled:** {last_hb.get('active_sources_count')}")
-            st.write(f"**Crash Recoveries Performed:** {last_hb.get('interrupted_tasks_recovered')}")
+            st.write(f"**Interrupted Tasks Flagged for Review:** {last_hb.get('interrupted_tasks_recovered')}")
         else:
             st.caption("Daemon has not run yet.")
 
@@ -624,30 +627,30 @@ with tabs[3]:
 
 # ----------------- Tab 4: Revenue Target Optimizer (₹1L/mo) -----------------
 with tabs[4]:
-    st.subheader("🎯 Monthly Revenue Target Optimizer (Goal: ≥ ₹1,00,000 / Month)")
-    st.caption("Mathematical unit economics, capacity planner, and priority ranking to reach and maintain a strict ₹1 Lakh/month income run-rate.")
+    st.subheader("🎯 Gross Paid Revenue Target Optimizer (Illustrative Goal: ₹1,00,000 / Month)")
+    st.caption("Tracks owner-confirmed gross receipts and estimates pipeline. It cannot guarantee customers, gross sales, net profit, or personal take-home income.")
 
     plan = RevenueOptimizer.analyze_monthly_target(MONTHLY_REVENUE_TARGET_INR)
 
     st.markdown("### Monthly Performance Dashboard")
     pc1, pc2, pc3, pc4 = st.columns(4)
-    pc1.metric("Monthly Target", f"₹{plan.monthly_target_inr:,.0f}")
-    pc2.metric("MTD Verified Paid", f"₹{plan.mtd_paid_inr:,.0f}", f"{plan.progress_pct}%")
-    pc3.metric("Invoiced / Pending", f"₹{plan.invoiced_pending_inr:,.0f}")
-    pc4.metric("Active Pipeline", f"₹{plan.pipeline_active_inr:,.0f}")
+    pc1.metric("Gross Paid Revenue Target", f"₹{plan.monthly_target_inr:,.0f}")
+    pc2.metric("MTD Owner-Confirmed Gross Paid", f"₹{plan.mtd_paid_inr:,.0f}", f"{plan.progress_pct}%")
+    pc3.metric("Outstanding Invoices (All Periods)", f"₹{plan.invoiced_pending_inr:,.0f}")
+    pc4.metric("Uncontracted Active Pipeline", f"₹{plan.pipeline_active_inr:,.0f}")
 
     st.progress(min(1.0, plan.progress_pct / 100.0), text=f"Progress to ₹1 Lakh: {plan.progress_pct}% (Gap: ₹{plan.target_gap_inr:,.0f})")
 
     st.info(f"💡 **Recommended Operational Action:** {plan.recommended_action}")
 
     st.divider()
-    st.markdown("### 📊 Proven ₹1,05,000 Monthly Service Mix")
-    st.write("To earn ≥ ₹1 Lakh per month reliably without burnout, SOLOEARN balances quick-turnaround analytics with higher-tier engineering deliverables:")
+    st.markdown("### 📊 Illustrative ₹1,05,000 Gross Billing Mix")
+    st.write("This is arithmetic using assumed catalog prices, not proven market demand or a delivery-capacity guarantee. The example is 46 direct delivery hours before sales, communication, revisions, administration, fees and taxes.")
     st.dataframe(pd.DataFrame(plan.optimal_monthly_mix), use_container_width=True, hide_index=True)
 
     st.divider()
-    st.markdown("### ⚡ Priority Opportunity Queue (Ranked by Hourly Yield)")
-    st.write("Jobs ranked strictly by expected profit per hour (`₹/hour`), favoring high-probability, low-risk clients:")
+    st.markdown("### ⚡ Priority Opportunity Queue (Risk-Adjusted Gross Yield Estimate)")
+    st.write("Jobs ranked by estimated risk-adjusted gross yield per delivery hour. This heuristic is not net profit, a trained payment probability, or a guarantee; it excludes acquisition, admin, fees and revisions:")
     all_opps = list_opportunities()
     if all_opps:
         ranked_opps = RevenueOptimizer.rank_opportunities_by_hourly_yield(all_opps)
@@ -658,7 +661,7 @@ with tabs[4]:
                 "Title": o["title"][:40],
                 "Budget (₹)": o["amount_inr"],
                 "Hours": o["estimated_hours"],
-                "Rate (₹/hr)": round(o["amount_inr"] / max(0.5, o["estimated_hours"]), 0),
+                "Risk-adjusted gross yield (₹/hr)": round(o.get("risk_adjusted_gross_yield_inr_per_hour", 0.0), 0),
                 "Skill Match": f"{int(o['skill_match'] * 100)}%",
                 "Confidence": f"{int(o['payment_confidence'] * 100)}%",
                 "Risk": o["risk_level"],
@@ -728,11 +731,11 @@ with tabs[5]:
 # ----------------- Tab 6: Earnings & Audit -----------------
 with tabs[6]:
     st.subheader("Record income")
-    st.caption("Only mark an amount as Paid after you have independently confirmed the money arrived in your account.")
+    st.caption("This form records expected or invoiced values only. Record paid receipts through the invoice workflow after independently checking your bank statement and payment reference.")
     with st.form("revenue_form", clear_on_submit=True):
         desc = st.text_input("Description", placeholder="Example: Client payment for sales dashboard")
         amount_paid = st.number_input("Amount (₹)", min_value=1.0, value=5000.0, step=500.0)
-        status = st.selectbox("Status", ["expected", "invoiced", "paid", "cancelled"])
+        status = st.selectbox("Status", ["expected", "invoiced", "cancelled"])
         opps = list_opportunities()
         revenue_opp = st.selectbox("Related opportunity (optional)", [None] + [o["id"] for o in opps], format_func=lambda i: "None" if i is None else f"#{i}")
         save_revenue = st.form_submit_button("Save revenue record")
@@ -755,4 +758,4 @@ with tabs[6]:
         st.dataframe(pd.DataFrame(logs), use_container_width=True, hide_index=True)
 
 st.divider()
-st.caption("SOLOEARN v0.1 · local-first prototype · no earnings are guaranteed · review all work and comply with each platform's rules.")
+st.caption("SOLOEARN v0.5.3 · local-first assisted-work system · no earnings are guaranteed · review all work and comply with each platform's rules.")

@@ -242,13 +242,18 @@ class Milestone5RevenueOpsTests(unittest.TestCase):
         engine = AutonomousExecutionEngine()
         task_id, workspace, plan = engine.execute_job(
             opportunity={"id": opp_id, "title": "Reconciliation Process Automation Script", "service_tier": "business_automation", "source_permitted": True, "status": "approved_for_work"},
-            file_bytes=b"dummy",
-            filename="spec.txt",
+            file_bytes=b"order_id,amount\n1,100\n1,100\n2,250\n",
+            filename="spec.csv",
         )
 
         self.assertTrue((workspace / "automation.py").exists())
         self.assertTrue((workspace / "config.json").exists())
         self.assertTrue((workspace / "README.md").exists())
+        self.assertTrue((workspace / "reconciled_output.csv").exists())
+        self.assertTrue((workspace / "automation_summary.json").exists())
+        automation_summary = json.loads((workspace / "automation_summary.json").read_text(encoding="utf-8"))
+        self.assertEqual(automation_summary["input_rows"], 3)
+        self.assertEqual(automation_summary["output_rows"], 2)
 
         qa = IndependentQAAgent(workspace, task_id)
         report = qa.run_all_checks()
