@@ -48,6 +48,7 @@ def init_db() -> None:
                 source_permitted INTEGER NOT NULL DEFAULT 0,
                 status TEXT NOT NULL DEFAULT 'new',
                 score REAL NOT NULL DEFAULT 0,
+                content_hash TEXT DEFAULT '',
                 created_at TEXT NOT NULL
             );
 
@@ -84,8 +85,35 @@ def init_db() -> None:
                 details TEXT NOT NULL,
                 created_at TEXT NOT NULL
             );
+
+            CREATE TABLE IF NOT EXISTS discovery_sources (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT NOT NULL,
+                source_type TEXT NOT NULL,
+                url_or_path TEXT NOT NULL,
+                is_permitted INTEGER NOT NULL DEFAULT 1,
+                is_active INTEGER NOT NULL DEFAULT 1,
+                poll_interval_minutes INTEGER NOT NULL DEFAULT 60,
+                last_polled_at TEXT,
+                created_at TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS proposals (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                opportunity_id INTEGER NOT NULL,
+                draft_text TEXT NOT NULL,
+                status TEXT NOT NULL DEFAULT 'draft',
+                model_used TEXT DEFAULT '',
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                FOREIGN KEY(opportunity_id) REFERENCES opportunities(id)
+            );
             """
         )
+        # Check column migration for content_hash in existing tables
+        cols = [r["name"] for r in conn.execute("PRAGMA table_info(opportunities)").fetchall()]
+        if "content_hash" not in cols:
+            conn.execute("ALTER TABLE opportunities ADD COLUMN content_hash TEXT DEFAULT ''")
 
 
 def log_event(event: str, details: str) -> None:
@@ -102,8 +130,8 @@ def add_opportunity(data: dict[str, Any], score: float) -> int:
             """INSERT INTO opportunities(
                 title, source, url, description, amount_inr, estimated_hours,
                 skill_match, payment_confidence, risk_level, source_permitted,
-                status, score, created_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'new', ?, ?)""",
+                status, score, content_hash, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'new', ?, ?, ?)""",
             (
                 data["title"][:180],
                 data["source"][:80],
@@ -116,6 +144,7 @@ def add_opportunity(data: dict[str, Any], score: float) -> int:
                 float(data["risk_level"]),
                 1 if data.get("source_permitted") else 0,
                 float(score),
+                data.get("content_hash", "")[:128],
                 utc_now(),
             ),
         )
@@ -158,6 +187,12 @@ VALID_TASK_STATUSES: set[str] = {
     "completed",
     "failed",
     "needs_manual_review",
+}
+
+VALID_PROPOSAL_STATUSES: set[str] = {
+    "draft",
+    "approved_by_owner",
+    "rejected",
 }
 
 
@@ -332,4 +367,126 @@ def metrics() -> dict[str, float | int]:
 def recent_audit(limit: int = 20) -> list[dict[str, Any]]:
     with connect() as conn:
         rows = conn.execute("SELECT * FROM audit_log ORDER BY id DESC LIMIT ?", (limit,)).fetchall()
+    return [dict(row) for row in rows]
+
+
+# Milestone 4: Discovery Sources & Proposals Management
+
+def add_discovery_source(
+    name: str,
+    source_type: str,
+    url_or_path: str,
+    is_permitted: bool = True,
+    is_active: bool = True,
+    poll_interval_minutes: int = 60,
+) -> int:
+    valid_types = {"rss", "atom", "json_api", "local_folder"}
+    if source_type not in valid_types:
+        raise ValueError(f"Invalid source type '{source_type}'. Allowed: {', '.join(sorted(valid_types))}")
+    if not name.strip():
+        raise ValueError("Source name is required")
+    if not url_or_path.strip():
+        raise ValueError("URL or file path is required")
+
+    with connect() as conn:
+        cur = conn.execute(
+            """INSERT INTO discovery_sources(name, source_type, url_or_path, is_permitted, is_active, poll_interval_minutes, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?)""",
+            (
+                name.strip()[:100],
+                source_type,
+                url_or_path.strip()[:500],
+                1 if is_permitted else 0,
+                1 if is_active else 0,
+                max(5, int(poll_interval_minutes)),
+                utc_now(),
+            ),
+        )
+        source_id = int(cur.lastrowid)
+    log_event("discovery_source_added", f"id={source_id}; name={name}")
+    return source_id
+
+
+def list_discovery_sources(active_only: bool = False) -> list[dict[str, Any]]:
+    query = "SELECT * FROM discovery_sources"
+    if active_only:
+        query += " WHERE is_active=1"
+    query += " ORDER BY id ASC"
+    with connect() as conn:
+        rows = conn.execute(query).fetchall()
+    return [dict(row) for row in rows]
+
+
+def get_discovery_source(source_id: int) -> dict[str, Any] | None:
+    with connect() as conn:
+        row = conn.execute("SELECT * FROM discovery_sources WHERE id=?", (source_id,)).fetchone()
+    return dict(row) if row else None
+
+
+def update_discovery_source_polled(source_id: int) -> None:
+    with connect() as conn:
+        conn.execute(
+            "UPDATE discovery_sources SET last_polled_at=? WHERE id=?",
+            (utc_now(), source_id),
+        )
+
+
+def delete_discovery_source(source_id: int) -> None:
+    with connect() as conn:
+        conn.execute("DELETE FROM discovery_sources WHERE id=?", (source_id,))
+    log_event("discovery_source_deleted", f"id={source_id}")
+
+
+def save_proposal_draft(opportunity_id: int, draft_text: str, model_used: str = "") -> int:
+    if not draft_text.strip():
+        raise ValueError("Proposal draft text cannot be empty")
+    with connect() as conn:
+        opp = conn.execute("SELECT id FROM opportunities WHERE id=?", (opportunity_id,)).fetchone()
+        if opp is None:
+            raise ValueError(f"Opportunity #{opportunity_id} not found")
+
+        existing = conn.execute("SELECT id FROM proposals WHERE opportunity_id=?", (opportunity_id,)).fetchone()
+        now = utc_now()
+        if existing:
+            prop_id = int(existing["id"])
+            conn.execute(
+                "UPDATE proposals SET draft_text=?, model_used=?, updated_at=? WHERE id=?",
+                (draft_text[:10000], model_used[:60], now, prop_id),
+            )
+        else:
+            cur = conn.execute(
+                """INSERT INTO proposals(opportunity_id, draft_text, status, model_used, created_at, updated_at)
+                VALUES (?, ?, 'draft', ?, ?, ?)""",
+                (opportunity_id, draft_text[:10000], model_used[:60], now, now),
+            )
+            prop_id = int(cur.lastrowid)
+    log_event("proposal_draft_saved", f"id={prop_id}; opp_id={opportunity_id}")
+    return prop_id
+
+
+def get_proposal(opportunity_id: int) -> dict[str, Any] | None:
+    with connect() as conn:
+        row = conn.execute("SELECT * FROM proposals WHERE opportunity_id=?", (opportunity_id,)).fetchone()
+    return dict(row) if row else None
+
+
+def update_proposal_status(proposal_id: int, status: str) -> None:
+    if status not in VALID_PROPOSAL_STATUSES:
+        raise ValueError(f"Invalid proposal status '{status}'")
+    with connect() as conn:
+        row = conn.execute("SELECT id FROM proposals WHERE id=?", (proposal_id,)).fetchone()
+        if row is None:
+            raise ValueError(f"Proposal #{proposal_id} not found")
+        conn.execute("UPDATE proposals SET status=?, updated_at=? WHERE id=?", (status, utc_now(), proposal_id))
+    log_event("proposal_status_changed", f"id={proposal_id}; status={status}")
+
+
+def list_proposals() -> list[dict[str, Any]]:
+    with connect() as conn:
+        rows = conn.execute(
+            """SELECT p.*, o.title as opportunity_title, o.source as opportunity_source, o.amount_inr
+               FROM proposals p
+               JOIN opportunities o ON o.id=p.opportunity_id
+               ORDER BY p.id DESC"""
+        ).fetchall()
     return [dict(row) for row in rows]

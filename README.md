@@ -31,6 +31,15 @@ A local-first, single-owner prototype for organizing legitimate paid-work opport
   - Strictly bounded retry loop (hard cap of max 3 attempts) preventing endless cycles.
   - Enforces workspace isolation with normalized path traversal and symlink protections.
   - Promotes work to `submission_ready` only upon 100% QA pass.
+- **Autonomous Opportunity Discovery & Screening (Milestone 4)**:
+  - Inbound lead intake adapter: parses standard RSS 2.0 feeds, Atom XML feeds, JSON APIs, and local file dropzones (`data/leads_dropzone/`).
+  - Zero web scraping or platform-rule evasion: ingests only permitted sources and user-provided feeds without automated account creation or terms violations.
+  - Strict SSRF protection: blocks loopback addresses (`127.0.0.1`, `localhost`), link-local IPs, private network ranges (`10.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16`), and non-HTTP schemes.
+  - Capability Matcher (`core/capability_matcher.py`): scores scope against SOLOEARN's verified deliverable capabilities (CSV/Excel analytics, data cleaning, charts, HTML summaries) and penalizes/rejects unsupported domains (mobile apps, crypto, video editing, copywriting).
+  - Risk & Fraud Analyzer (`core/risk_analyzer.py`): flags off-platform communication schemes (Telegram, WhatsApp, Skype), payment scams (crypto, gift cards, check deposits), rate anomalies, and suspicious TLDs.
+  - Multi-level deduplication: canonicalizes URLs and hashes title/description via SHA-256 fingerprinting.
+  - Tailored Proposal Generator (`core/proposal_generator.py`): produces honest, professional proposals referencing the verified deliverable bundle (`business_analysis.xlsx`, `cleaned_data.csv`, `report.html`, charts) and 6-suite QA guarantee with zero hallucinated promises.
+  - Explicit Human Authorization Gate: proposals start as `draft` and strictly require owner review and checkbox authorization before submission.
 - Optional local Ollama connection for proposal drafting and aggregate-only report observations.
 - CSV workbench that creates:
   - `business_analysis.xlsx` (cleaned data, data-quality profile, numeric summary)
@@ -144,6 +153,28 @@ Use `sample_opportunities.csv` included in this folder:
 6. Expand **View Execution Plan & QA Report Details** to inspect check results.
 7. Click **📦 Download Verified Deliverables ZIP** to inspect the finished client package.
 8. Check the human review authorization checkbox and click **Authorize & Mark Submitted by Owner**.
+
+## Test Autonomous Discovery & Proposals (Milestone 4)
+
+1. Open **Opportunities** in the dashboard.
+2. Select the **Autonomous Discovery (M4)** tab.
+3. Manage Discovery Sources:
+   - Pre-configured with local dropzone, sample RSS 2.0 (`data/sample_feeds/sample_rss.xml`), and sample JSON API (`data/sample_feeds/sample_leads.json`).
+   - Add custom RSS/Atom feeds or JSON endpoints with verification and authorization flags.
+4. Click **📡 Poll Authorized Discovery Sources**:
+   - Ingests feeds with strict SSRF protection (blocking loopbacks and private networks).
+   - Scans `data/leads_dropzone/` for inbound lead files.
+   - Capability Matcher evaluates data analytics skill match and penalizes unsupported domains.
+   - Risk & Fraud Analyzer flags Telegram/WhatsApp redirects, crypto/wire payment scams, and rate anomalies.
+   - Multi-level deduplication drops repeated URLs and identical content hashes.
+5. Review the Inbound Discovery Pipeline:
+   - Inspect hourly yield ranking (₹/hour), capability match %, and risk score.
+   - Review flagged scam warnings and reasons before acting.
+6. Generate and Authorize Tailored Proposals:
+   - Select a high-scoring discovered lead and click **Generate Tailored Proposal**.
+   - Review the proposal text referencing verified deliverable artifacts (`business_analysis.xlsx`, `report.html`, charts) and 6-suite QA guarantee.
+   - Check the **I have verified this proposal meets platform standards** checkbox and click **Authorize Proposal for Submission**.
+   - Only authorized proposals advance to the ready queue; zero automatic or unsolicited sending.
 
 ## Use Antigravity / Claude Code
 

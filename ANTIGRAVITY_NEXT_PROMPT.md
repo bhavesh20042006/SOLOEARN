@@ -12,14 +12,14 @@ You are extending an existing local-first Python application named SOLOEARN. Rea
 Status:
 - Milestone 1 (Local workbench, SQLite ledger, scoring, CSV deliverables): Complete.
 - Milestone 2 (Structured CSV opportunity intake, strict validation, duplicate detection, human confirmation gate): Complete.
-- Milestone 3 (Autonomous execution engine, independent QA agent with 6 verification suites, bounded revision engine, submission-ready state): Complete.
-- Milestone 3.1 & 3.2 (Independent code audit hardening: Windows path normalization, fail-closed execution gate, all-sheet formula scanning, dimensions check, complete numeric summary validation, repaired HTML escaping, client archive allow-list packaging, retry hard cap, task tracking, finite revenue validation, UI state controls): Complete.
-- Automated test suite: 49/49 tests passing.
+- Milestone 3 & 3.2 (Autonomous execution engine, independent QA agent with 6 verification suites, bounded revision engine, submission-ready state, audit hardening): Complete.
+- Milestone 4 (Autonomous opportunity discovery, RSS/Atom & JSON intake, capability matching, risk & fraud analyzer, SSRF protection, multi-level deduplication, tailored proposal generator, owner authorization gate): Complete.
+- Automated test suite: 64/64 tests passing.
 
-Next Milestone: Milestone 4 — Autonomous Opportunity Discovery & Client Acquisition.
-- Build an authorized inbound lead intake adapter (support permitted RSS/JSON feeds and direct inbound inquiry formats).
-- Implement automated lead scoring, skill matching, and priority ranking without web scraping or platform-rule evasion.
-- Generate tailored, honest client proposals referencing verified deliverable capabilities with zero unsubstantiated claims.
-- Add an outreach and communication queue with strict human review and authorization gates prior to sending.
-- Maintain isolated workspaces and local-first boundaries.
-- Add comprehensive automated tests for feed parsing, lead scoring, proposal drafting, and communication safety guards. Run all tests before declaring completion.
+Next Milestone: Milestone 5 — Client Communication, Contract Tracking & Verified Delivery.
+- Inbound client message ingestion & revision request parsing.
+- Milestone and contract state machine (accepted -> in_progress -> review_pending -> approved -> invoiced -> paid).
+- Automated revision packager (diff reports, amended workbooks, updated charts).
+- Invoice generation (tax, rate, terms) with audit trail.
+- Payment receipt verification workflow before revenue is marked paid.
+- Continue strict local-first and approval-gated principles: no automated sending or financial movement without owner approval.

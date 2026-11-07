@@ -31,6 +31,7 @@ class AuditHardeningTests(unittest.TestCase):
         ensure_directories()
         init_db()
         with connect() as conn:
+            conn.execute("DELETE FROM proposals")
             conn.execute("DELETE FROM revenue")
             conn.execute("DELETE FROM tasks")
             conn.execute("DELETE FROM opportunities")

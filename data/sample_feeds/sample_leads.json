@@ -1,0 +1,19 @@
+{
+  "source": "Partner Business Inquiries",
+  "items": [
+    {
+      "title": "Hospitality Booking Trends & Seasonal Metrics",
+      "description": "Analyze monthly hotel booking CSV, generate distribution histograms for stay duration, clean missing values, and compile Excel report. Quoted: ₹7,000 for 3 hours.",
+      "url": "https://example.com/leads/hotel-trends-789",
+      "amount_inr": 7000.0,
+      "estimated_hours": 3.0
+    },
+    {
+      "title": "Warehouse Logistics Inventory Audit",
+      "description": "Inventory data cleaning and deduplication across 15 warehouse product lines. Output needed as cleaned CSV and interactive Excel workbook. Budget: ₹9,500.",
+      "url": "https://example.com/leads/warehouse-audit-456",
+      "amount_inr": 9500.0,
+      "estimated_hours": 4.5
+    }
+  ]
+}

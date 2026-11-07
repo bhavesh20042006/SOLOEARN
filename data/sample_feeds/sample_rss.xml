@@ -1,0 +1,26 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<rss version="2.0">
+<channel>
+  <title>Verified Analytics Freelance Opportunities</title>
+  <link>https://example.com/analytics-feed</link>
+  <description>Authorized sample RSS feed of client data requests</description>
+  <item>
+    <title>E-commerce Store Sales CSV Analysis &amp; Dashboard</title>
+    <link>https://example.com/jobs/sales-csv-analysis</link>
+    <description>Looking for a data analyst to clean our monthly Shopify sales CSV, calculate key customer KPIs, generate distribution charts, and format a multi-tab Excel workbook for our quarterly review. Budget: ₹8,000 for 4 hours.</description>
+    <pubDate>Fri, 07 Nov 2026 12:00:00 GMT</pubDate>
+  </item>
+  <item>
+    <title>Urgent: Crypto App Builder - Contact Telegram @fastcrypto</title>
+    <link>https://example.xyz/jobs/crypto-scam</link>
+    <description>Build fullstack mobile app in Flutter. Payment in USDT or gift cards. Deposit security fee first. Contact on Telegram.</description>
+    <pubDate>Fri, 07 Nov 2026 11:30:00 GMT</pubDate>
+  </item>
+  <item>
+    <title>Customer Churn &amp; Product Return Rate Spreadsheet Cleanup</title>
+    <link>https://example.com/jobs/customer-churn-cleanup</link>
+    <description>We have raw sales data in CSV with duplicate rows and missing values. Need deduplication, data quality profiling, and summary presentation report. Budget: ₹6,500.</description>
+    <pubDate>Fri, 07 Nov 2026 10:15:00 GMT</pubDate>
+  </item>
+</channel>
+</rss>
