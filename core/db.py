@@ -151,6 +151,90 @@ def init_db() -> None:
                 completed_at TEXT,
                 FOREIGN KEY(task_id) REFERENCES tasks(id)
             );
+
+            CREATE TABLE IF NOT EXISTS expenses (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                expense_date TEXT NOT NULL,
+                vendor TEXT NOT NULL,
+                category TEXT NOT NULL,
+                amount_inr REAL NOT NULL,
+                amount_paise INTEGER NOT NULL,
+                currency TEXT NOT NULL DEFAULT 'INR',
+                job_id INTEGER,
+                is_recurring INTEGER NOT NULL DEFAULT 0,
+                business_use_pct REAL NOT NULL DEFAULT 100.0,
+                gst_amount_inr REAL NOT NULL DEFAULT 0.0,
+                tax_deductibility TEXT NOT NULL DEFAULT 'unknown',
+                reviewer_notes TEXT DEFAULT '',
+                created_at TEXT NOT NULL,
+                FOREIGN KEY(job_id) REFERENCES opportunities(id)
+            );
+
+            CREATE TABLE IF NOT EXISTS financial_transactions (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                tx_date TEXT NOT NULL,
+                tx_type TEXT NOT NULL,
+                amount_inr REAL NOT NULL,
+                amount_paise INTEGER NOT NULL,
+                currency TEXT NOT NULL DEFAULT 'INR',
+                reference_id TEXT DEFAULT '',
+                description TEXT NOT NULL,
+                is_reversal INTEGER NOT NULL DEFAULT 0,
+                linked_tx_id INTEGER,
+                created_at TEXT NOT NULL,
+                FOREIGN KEY(linked_tx_id) REFERENCES financial_transactions(id)
+            );
+
+            CREATE TABLE IF NOT EXISTS tax_profiles (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                profile_name TEXT NOT NULL,
+                entity_type TEXT NOT NULL DEFAULT 'individual_sole_proprietor',
+                residential_status TEXT NOT NULL DEFAULT 'resident',
+                tax_year TEXT NOT NULL DEFAULT '2026-27',
+                regime TEXT NOT NULL DEFAULT 'new_2025',
+                other_annual_income_inr REAL NOT NULL DEFAULT 0.0,
+                advance_tax_paid_inr REAL NOT NULL DEFAULT 0.0,
+                tds_credits_inr REAL NOT NULL DEFAULT 0.0,
+                is_active INTEGER NOT NULL DEFAULT 1,
+                created_at TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS bank_statement_imports (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                filename TEXT NOT NULL,
+                imported_at TEXT NOT NULL,
+                row_count INTEGER NOT NULL DEFAULT 0,
+                reconciled_count INTEGER NOT NULL DEFAULT 0,
+                notes TEXT DEFAULT ''
+            );
+
+            CREATE TABLE IF NOT EXISTS bank_statement_rows (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                import_id INTEGER NOT NULL,
+                tx_date TEXT NOT NULL,
+                description TEXT NOT NULL,
+                amount_inr REAL NOT NULL,
+                amount_paise INTEGER NOT NULL,
+                tx_type TEXT NOT NULL,
+                bank_ref TEXT DEFAULT '',
+                is_reconciled INTEGER NOT NULL DEFAULT 0,
+                matched_entity_type TEXT DEFAULT '',
+                matched_entity_id TEXT DEFAULT '',
+                confirmed_by_owner INTEGER NOT NULL DEFAULT 0,
+                confirmed_at TEXT,
+                FOREIGN KEY(import_id) REFERENCES bank_statement_imports(id) ON DELETE CASCADE
+            );
+
+            CREATE TABLE IF NOT EXISTS gst_records (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                period TEXT NOT NULL,
+                aggregate_turnover_inr REAL NOT NULL DEFAULT 0.0,
+                gst_collected_inr REAL NOT NULL DEFAULT 0.0,
+                gst_paid_inr REAL NOT NULL DEFAULT 0.0,
+                itc_claimed_inr REAL NOT NULL DEFAULT 0.0,
+                status TEXT NOT NULL DEFAULT 'tracking',
+                created_at TEXT NOT NULL
+            );
             """
         )
         # Check column migration for content_hash in existing tables

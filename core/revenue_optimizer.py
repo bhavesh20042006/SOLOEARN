@@ -6,6 +6,12 @@ from datetime import datetime, timezone
 from typing import Any
 
 from core.db import connect
+from core.net_profit_optimizer import (
+    NetProfitOptimizer,
+    NetProfitPlan,
+    MONTHLY_NET_PROFIT_TARGET_INR,
+    MONTHLY_BUFFER_TARGET_INR,
+)
 
 
 MONTHLY_REVENUE_TARGET_INR = 100000.0  # ₹1,00,000 / Month

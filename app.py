@@ -60,6 +60,29 @@ from core.revenue_optimizer import (
     SERVICE_CATALOG,
     RevenueOptimizer,
 )
+from core.financial_ledger import (
+    get_cash_and_reserves_summary,
+    get_expenses_summary,
+    import_bank_statement_csv,
+    list_expenses,
+    list_ledger_transactions,
+    list_unreconciled_statement_rows,
+    reconcile_statement_row,
+    register_expense,
+)
+from core.net_profit_optimizer import (
+    MONTHLY_BUFFER_TARGET_INR,
+    MONTHLY_NET_PROFIT_TARGET_INR,
+    NetProfitOptimizer,
+    SERVICE_PROFIT_SPECS,
+)
+from core.tax_engine import (
+    GST_SERVICE_THRESHOLD_INR,
+    GST_WARNING_THRESHOLD_INR,
+    compute_income_tax_india_2026,
+    compute_required_pretax_profit,
+    get_gst_status,
+)
 from core.scheduler import AutonomousDaemonScheduler
 from core.scoring import opportunity_score, score_label
 
@@ -103,7 +126,7 @@ tabs = st.tabs([
     "Autonomous Discovery (M4)",
     "Opportunity Pipeline",
     "Revenue Operations & Invoicing (M5)",
-    "Revenue Target Optimizer (₹1L/mo)",
+    "Net Profit Control Centre (M6)",
     "CSV Workbench",
     "Earnings & audit",
 ])
@@ -625,32 +648,154 @@ with tabs[3]:
             st.rerun()
 
 
-# ----------------- Tab 4: Revenue Target Optimizer (₹1L/mo) -----------------
+# ----------------- Tab 4: Net Profit Control Centre (M6) -----------------
 with tabs[4]:
-    st.subheader("🎯 Gross Paid Revenue Target Optimizer (Illustrative Goal: ₹1,00,000 / Month)")
-    st.caption("Tracks owner-confirmed gross receipts and estimates pipeline. It cannot guarantee customers, gross sales, net profit, or personal take-home income.")
+    st.subheader("💎 Net Profit Intelligence Control Centre (Milestone 6)")
+    st.caption("Engineered strictly around ₹1,00,000 / Month AFTER ALL business expenses and Indian income tax (Income-tax Act, 2025).")
 
-    plan = RevenueOptimizer.analyze_monthly_target(MONTHLY_REVENUE_TARGET_INR)
+    np_plan = NetProfitOptimizer.analyze_net_profit(MONTHLY_NET_PROFIT_TARGET_INR)
 
-    st.markdown("### Monthly Performance Dashboard")
-    pc1, pc2, pc3, pc4 = st.columns(4)
-    pc1.metric("Gross Paid Revenue Target", f"₹{plan.monthly_target_inr:,.0f}")
-    pc2.metric("MTD Owner-Confirmed Gross Paid", f"₹{plan.mtd_paid_inr:,.0f}", f"{plan.progress_pct}%")
-    pc3.metric("Outstanding Invoices (All Periods)", f"₹{plan.invoiced_pending_inr:,.0f}")
-    pc4.metric("Uncontracted Active Pipeline", f"₹{plan.pipeline_active_inr:,.0f}")
+    st.markdown("### 🏆 Post-Tax Owner Profit North Star")
+    kpi1, kpi2, kpi3, kpi4 = st.columns(4)
+    kpi1.metric("Take-Home Profit Target", f"₹{np_plan.monthly_net_profit_target_inr:,.0f}/mo", "₹12 Lakh / Yr")
+    kpi2.metric("Confirmed Net Profit MTD", f"₹{np_plan.mtd_net_profit_after_tax_inr:,.0f}", f"{np_plan.progress_pct}%")
+    kpi3.metric("Operating Expenses MTD", f"₹{np_plan.mtd_operating_expenses_inr:,.0f}", f"{np_plan.observed_expense_ratio_pct}% cost ratio")
+    kpi4.metric("Distributable Cash In Bank", f"₹{np_plan.distributable_cash_inr:,.0f}", "After tax/GST reserves")
 
-    st.progress(min(1.0, plan.progress_pct / 100.0), text=f"Progress to ₹1 Lakh: {plan.progress_pct}% (Gap: ₹{plan.target_gap_inr:,.0f})")
+    st.progress(
+        min(1.0, np_plan.progress_pct / 100.0),
+        text=f"Progress to ₹1 Lakh Post-Tax Profit: {np_plan.progress_pct}% (Net Gap: ₹{np_plan.net_profit_gap_inr:,.0f})"
+    )
 
-    st.info(f"💡 **Recommended Operational Action:** {plan.recommended_action}")
+    st.info(f"💡 **Net Profit Intelligence:** {np_plan.recommended_action}")
 
+    # Section 1: Financial Reserves & GST Separation
     st.divider()
-    st.markdown("### 📊 Illustrative ₹1,05,000 Gross Billing Mix")
-    st.write("This is arithmetic using assumed catalog prices, not proven market demand or a delivery-capacity guarantee. The example is 46 direct delivery hours before sales, communication, revisions, administration, fees and taxes.")
-    st.dataframe(pd.DataFrame(plan.optimal_monthly_mix), use_container_width=True, hide_index=True)
+    st.markdown("### ⚖️ Tax, GST & Cash Runway Reserves (C = B - G - T - U - W)")
+    cash_info = get_cash_and_reserves_summary()
+    rc1, rc2, rc3, rc4 = st.columns(4)
+    rc1.metric("Bank Cash Balance (B)", f"₹{cash_info['bank_balance_inr']:,.2f}")
+    rc2.metric("GST Liability Reserve (G)", f"₹{cash_info['gst_liability_reserve_inr']:,.2f}")
+    rc3.metric("Income Tax Reserve (T)", f"₹{cash_info['income_tax_reserve_inr']:,.2f}", f"Est. Tax MTD: ₹{np_plan.mtd_estimated_income_tax_inr:,.0f}")
+    rc4.metric("Working Capital Buffer (W)", f"₹{cash_info['working_capital_buffer_inr']:,.2f}")
 
+    gst_status = np_plan.gst_status
+    if gst_status["status"] == "CA_REVIEW_REQUIRED":
+        st.error(f"⚠️ **GST Alert:** {gst_status['message']}")
+    elif gst_status["status"] == "APPROACHING_THRESHOLD":
+        st.warning(f"⚠️ **GST Warning:** {gst_status['message']}")
+    else:
+        st.success(f"✅ **GST Status:** {gst_status['message']}")
+
+    # Section 2: Required Customer Receipts Model
     st.divider()
-    st.markdown("### ⚡ Priority Opportunity Queue (Risk-Adjusted Gross Yield Estimate)")
-    st.write("Jobs ranked by estimated risk-adjusted gross yield per delivery hour. This heuristic is not net profit, a trained payment probability, or a guarantee; it excludes acquisition, admin, fees and revisions:")
+    st.markdown("### 📈 Required Customer Receipts ex-GST to Net ₹1,00,000 / Month")
+    st.caption("Under Income-tax Act, 2025 Section 202 & Section 156, ₹12.74 Lakh annual pre-tax profit yields ₹12.00 Lakh post-tax profit (₹1 Lakh/mo).")
+
+    cost_ratios = [10, 20, 25, 30, 35, 40, 50]
+    annual_pretax = np_plan.annual_pretax_profit_required_inr
+    model_rows = []
+    for cr in cost_ratios:
+        frac = cr / 100.0
+        req_annual = annual_pretax / (1.0 - frac)
+        req_monthly = req_annual / 12.0
+        model_rows.append({
+            "Operating Cost Ratio": f"{cr}%",
+            "Monthly Collected Receipts Needed": f"₹{req_monthly:,.0f}",
+            "Annual Receipts Needed": f"₹{req_annual:,.0f}",
+            "Required Jobs (at ~₹10k avg)": f"{math.ceil(req_monthly / 10000.0)} jobs/mo",
+        })
+    st.dataframe(pd.DataFrame(model_rows), use_container_width=True, hide_index=True)
+
+    # Section 3: Expense Registration & Bank Reconciliation Forms
+    st.divider()
+    st.markdown("### 🧾 Business Expenses & Bank Statement Reconciliation")
+    exp_col, bank_col = st.columns([1, 1])
+
+    with exp_col:
+        st.markdown("#### ➕ Record Business Expense")
+        with st.form("add_expense_form"):
+            vendor = st.text_input("Vendor / Payee Name", placeholder="e.g. Hetzner Cloud, Domain, Upwork Connects")
+            cat = st.selectbox(
+                "Expense Category",
+                options=["software_tool", "hosting_infra", "marketing_acquisition", "direct_project_cost", "accounting_legal", "office_overhead", "other"],
+                format_func=lambda x: x.replace("_", " ").title(),
+            )
+            exp_amount = st.number_input("Expense Amount (₹)", min_value=1.0, value=500.0, step=50.0)
+            gst_paid_input = st.number_input("GST Paid (Input Tax Credit) ₹", min_value=0.0, value=0.0, step=10.0)
+            deduct = st.selectbox("Tax Deductibility", options=["deductible", "unknown", "partly_deductible", "non_deductible"])
+            business_pct = st.slider("Business Use %", min_value=0.0, max_value=100.0, value=100.0, step=5.0)
+            exp_notes = st.text_input("Reviewer Notes", placeholder="Receipt hash / reference / invoice number")
+
+            add_exp_btn = st.form_submit_button("Record Expense in Ledger")
+            if add_exp_btn:
+                try:
+                    eid = register_expense(
+                        vendor=vendor,
+                        category=cat,
+                        amount_inr=exp_amount,
+                        business_use_pct=business_pct,
+                        gst_amount_inr=gst_paid_input,
+                        tax_deductibility=deduct,
+                        reviewer_notes=exp_notes,
+                    )
+                    st.success(f"Expense EXP-{eid:05d} recorded and ledger updated!")
+                    st.rerun()
+                except Exception as exc:
+                    st.error(f"Error registering expense: {exc}")
+
+    with bank_col:
+        st.markdown("#### 🏦 Import Bank Statement CSV & Reconcile")
+        bank_csv = st.file_uploader("Upload Bank Statement (CSV only)", type=["csv"], key="bank_stmt_upload")
+        if bank_csv:
+            if st.button("Import Bank Statement"):
+                try:
+                    b_res = import_bank_statement_csv(bank_csv.getvalue(), filename=bank_csv.name)
+                    st.success(f"Imported {b_res['rows_imported']} rows from {bank_csv.name}!")
+                    st.rerun()
+                except Exception as exc:
+                    st.error(f"Import error: {exc}")
+
+        st.markdown("##### Unreconciled Bank Entries")
+        unreconciled = list_unreconciled_statement_rows(limit=5)
+        if unreconciled:
+            for u in unreconciled:
+                st.write(f"• **{u['tx_date']}** | {u['tx_type'].upper()}: ₹{u['amount_inr']:,.2f} | *{u['description'][:35]}* (Ref: `{u['bank_ref'] or 'N/A'}`)")
+        else:
+            st.caption("Zero unreconciled bank rows. All imported transactions matched.")
+
+    # Section 4: Service Unit Economics & Minimum Quote Calculator
+    st.divider()
+    st.markdown("### 🧮 Service Unit Economics & Minimum Profitable Quote Calculator")
+    calc_c1, calc_c2 = st.columns([1, 1])
+
+    with calc_c1:
+        st.markdown("#### Minimum Quote Safeguard")
+        st.caption("Never accept jobs that fall below our minimum 50% contribution margin threshold.")
+        q_hours = st.number_input("Project Estimated Hours", min_value=0.5, max_value=40.0, value=3.0, step=0.5)
+        q_direct = st.number_input("Direct Costs (Data / APIs) ₹", min_value=0.0, value=200.0, step=50.0)
+        q_hourly = st.number_input("Desired Minimum Hourly Return (₹/hr)", min_value=1000.0, value=2000.0, step=250.0)
+
+        quote_res = NetProfitOptimizer.calculate_minimum_profitable_quote(
+            estimated_hours=q_hours,
+            direct_costs_inr=q_direct,
+            desired_hourly_return_inr=q_hourly,
+        )
+        st.write(f"**Recommended Minimum Quote:** ₹{quote_res['minimum_quote_inr']:,.2f}")
+        st.write(f"**Net Contribution:** ₹{quote_res['net_contribution_inr']:,.2f} ({quote_res['contribution_margin_pct']}% margin)")
+        st.write(f"**Effective Hourly Return:** ₹{quote_res['effective_hourly_return_inr']:,.2f}/hr")
+        if quote_res["is_acceptable"]:
+            st.success("✅ Profitable: Exceeds 50% contribution margin requirement.")
+        else:
+            st.error("❌ Unprofitable: Expected contribution margin below 50%. Reject or re-quote.")
+
+    with calc_c2:
+        st.markdown("#### Standard Service Catalog Unit Economics")
+        st.dataframe(pd.DataFrame(np_plan.service_economics), use_container_width=True, hide_index=True)
+
+    # Section 5: Priority Opportunity Queue Ranked by Risk-Adjusted Return
+    st.divider()
+    st.markdown("### ⚡ Priority Opportunity Queue (Risk-Adjusted Hourly Yield)")
     all_opps = list_opportunities()
     if all_opps:
         ranked_opps = RevenueOptimizer.rank_opportunities_by_hourly_yield(all_opps)
