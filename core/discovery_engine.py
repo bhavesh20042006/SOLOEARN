@@ -2,24 +2,31 @@ from __future__ import annotations
 
 import csv
 import hashlib
+import http.client
 import ipaddress
 import json
+import math
+import os
 import re
 import socket
-import urllib.error
-import urllib.request
+import ssl
 import xml.etree.ElementTree as ET
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
-from urllib.parse import urlparse
+from urllib.parse import urljoin, urlsplit
 
 from core.capability_matcher import CapabilityMatcher
-from core.config import LEADS_DROPZONE_DIR
+from core.config import LEADS_DROPZONE_DIR, PROJECT_ROOT
 from core.db import add_opportunity, connect, log_event, update_discovery_source_polled
 from core.risk_analyzer import RiskAnalyzer
 from core.scoring import opportunity_score
+
+MAX_FEED_BYTES = 2 * 1024 * 1024
+MAX_FEED_ITEMS = 1000
+MAX_REDIRECTS = 5
+HTTP_TIMEOUT_SECONDS = 12.0
 
 
 @dataclass
@@ -69,117 +76,273 @@ def compute_content_hash(title: str, description: str) -> str:
 
 
 def extract_budget_inr(text: str) -> float:
-    """Extracts budget mentions (INR or USD converted) from job text with fallback."""
-    # Look for INR symbols or text: ₹ 5,000 or INR 5,000 or Rs. 5000
-    inr_match = re.search(r"(?:₹|inr|rs\.?)\s*([0-9]+(?:,[0-9]+)*(?:\.[0-9]+)?)", text, re.IGNORECASE)
-    if inr_match:
-        try:
-            val_str = inr_match.group(1).replace(",", "")
-            val = float(val_str)
-            if 100 <= val <= 500000:
-                return round(val, 2)
-        except ValueError:
-            pass
-
-    # Look for USD symbols: $ 100 -> convert at ₹85/USD
-    usd_match = re.search(r"\$\s*([0-9]+(?:,[0-9]+)*(?:\.[0-9]+)?)", text)
-    if usd_match:
-        try:
-            val_str = usd_match.group(1).replace(",", "")
-            val = float(val_str) * 85.0
-            if 100 <= val <= 500000:
-                return round(val, 2)
-        except ValueError:
-            pass
-
-    # Default realistic baseline for verified data-analytics gigs
-    return 5000.0
-
-
-def validate_source_url(url: str) -> tuple[bool, str]:
-    """
-    Validates URL safety and guards against Server-Side Request Forgery (SSRF).
-    Only http and https protocols are permitted; local, link-local, loopback and private network addresses are blocked.
-    Performs comprehensive DNS address resolution to prevent DNS rebinding attacks.
-    """
-    if not url or not isinstance(url, str):
-        return False, "URL is empty or invalid"
+    """Extract an explicitly stated INR budget. Unknown budgets stay zero (unknown)."""
+    inr_match = re.search(r"(?:₹|inr|rs\.?)\s*([0-9]+(?:,[0-9]+)*(?:\.[0-9]+)?)", text or "", re.IGNORECASE)
+    if not inr_match:
+        return 0.0
     try:
-        parsed = urlparse(url)
+        value = float(inr_match.group(1).replace(",", ""))
+    except (TypeError, ValueError):
+        return 0.0
+    if not (100 <= value <= 500000):
+        return 0.0
+    return round(value, 2)
+
+
+def _is_public_ip(value: str) -> bool:
+    try:
+        ip = ipaddress.ip_address(value.split("%")[0])
+    except ValueError:
+        return False
+    if isinstance(ip, ipaddress.IPv6Address) and ip.ipv4_mapped:
+        ip = ip.ipv4_mapped
+    return bool(ip.is_global and not (ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_reserved or ip.is_multicast or ip.is_unspecified))
+
+
+def validate_source_url(
+    url: str,
+    *,
+    resolve_dns: bool = False,
+    resolver=None,
+) -> tuple[bool, str]:
+    """Validate an HTTP(S) URL. When fetching, resolve and reject *all* non-public DNS answers."""
+    if (not url or not isinstance(url, str) or len(url) > 2048 or url != url.strip()
+            or "\\" in url or any(ord(ch) < 32 for ch in url)):
+        return False, "URL is empty, too long, malformed, or contains unsafe characters"
+    try:
+        parsed = urlsplit(url)
+        port = parsed.port
     except Exception as exc:
         return False, f"URL parse failure: {exc}"
 
-    if parsed.scheme.lower() not in ("http", "https"):
+    scheme = parsed.scheme.lower()
+    if scheme not in ("http", "https"):
         return False, f"Invalid scheme '{parsed.scheme}'. Only http and https are allowed."
+    if parsed.username is not None or parsed.password is not None:
+        return False, "URLs containing embedded credentials are forbidden."
 
-    hostname = parsed.hostname
+    hostname = (parsed.hostname or "").rstrip(".").lower()
     if not hostname:
         return False, "URL hostname is missing"
-
-    # Reject localhost & internal loopback hosts
-    if hostname.lower() in ("localhost", "127.0.0.1", "::1", "0.0.0.0", "local"):
-        return False, f"SSRF Protection: Access to localhost ({hostname}) is forbidden."
-
-    # 1. Check if hostname itself is an IP address
+    if hostname == "localhost" or hostname.endswith((".localhost", ".local", ".internal")):
+        return False, f"SSRF Protection: localhost or internal hostname ({hostname}) is forbidden."
     try:
-        ip = ipaddress.ip_address(hostname)
-        if ip.is_private or ip.is_loopback or ip.is_reserved or ip.is_link_local or ip.is_multicast:
-            return False, f"SSRF Protection: Private or reserved IP address ({hostname}) is forbidden."
+        literal_ip = ipaddress.ip_address(hostname)
     except ValueError:
-        pass
+        literal_ip = None
+    if literal_ip is not None and not _is_public_ip(hostname):
+        return False, f"SSRF Protection: localhost/private or reserved IP address ({hostname}) is forbidden."
 
-    # 2. DNS Resolution check: resolve all IP addresses for domain hostname
-    try:
-        addr_infos = socket.getaddrinfo(hostname, None)
-        for _, _, _, _, sockaddr in addr_infos:
-            ip_str = sockaddr[0]
+    expected_port = 80 if scheme == "http" else 443
+    if port not in (None, expected_port):
+        return False, "Only standard HTTP (80) and HTTPS (443) ports are permitted."
+
+    is_ip = literal_ip is not None
+
+    if resolve_dns and not is_ip:
+        dns_resolver = resolver or socket.getaddrinfo
+        try:
+            answers = dns_resolver(hostname, port or expected_port, type=socket.SOCK_STREAM)
+        except Exception as exc:
+            return False, f"DNS resolution failed for source host: {exc}"
+        addresses = []
+        for answer in answers:
             try:
-                ip = ipaddress.ip_address(ip_str)
-                if ip.is_private or ip.is_loopback or ip.is_reserved or ip.is_link_local or ip.is_multicast:
-                    return False, f"SSRF Protection: Hostname '{hostname}' resolves to private/reserved IP {ip_str}."
-            except ValueError:
-                pass
-    except (socket.gaierror, socket.herror):
-        # Hostname could not be resolved via DNS
-        pass
-    except Exception as exc:
-        return False, f"SSRF DNS check failure: {exc}"
+                addr = answer[4][0]
+            except (IndexError, TypeError):
+                continue
+            addresses.append(addr)
+        if not addresses:
+            return False, "DNS resolution returned no usable addresses."
+        blocked = [addr for addr in addresses if not _is_public_ip(addr)]
+        if blocked:
+            return False, f"SSRF Protection: hostname resolves to a non-public address ({blocked[0]})."
 
     return True, ""
 
 
-class SafeSSRFRedirectHandler(urllib.request.HTTPRedirectHandler):
-    """Intercepts HTTP redirects to verify destination does not violate SSRF protections."""
-    def redirect_request(self, req, fp, code, msg, headers, newurl):
-        is_safe, reason = validate_source_url(newurl)
-        if not is_safe:
-            raise urllib.error.HTTPError(
-                newurl, 403, f"SSRF Blocked: Redirect to unsafe location '{newurl}' denied: {reason}", headers, fp
-            )
-        return super().redirect_request(req, fp, code, msg, headers, newurl)
+def safe_dropzone_path(target: str | Path | None, *, expect_directory: bool = False) -> Path:
+    """Resolve local feeds inside the approved dropzone or two fixed bundled legacy fixtures."""
+    LEADS_DROPZONE_DIR.mkdir(parents=True, exist_ok=True)
+    if LEADS_DROPZONE_DIR.is_symlink():
+        raise ValueError("Lead dropzone root cannot be a symlink")
+    root = LEADS_DROPZONE_DIR.resolve()
+    raw = Path(target) if target else root
+    if not raw.is_absolute():
+        raw = root / raw
+    raw = Path(os.path.abspath(str(raw)))
 
+    # Backward compatibility for existing v0.4 installations whose SQLite source
+    # records point at the bundled sample_feeds paths. Only these two filenames
+    # are allowed from that legacy directory; arbitrary files remain blocked.
+    legacy_root = PROJECT_ROOT / "data" / "sample_feeds"
+    legacy_allowed_names = {"sample_rss.xml", "sample_leads.json"}
+    is_legacy_fixture = False
+    try:
+        legacy_relative = raw.relative_to(legacy_root)
+        is_legacy_fixture = (not expect_directory and len(legacy_relative.parts) == 1
+                             and legacy_relative.name in legacy_allowed_names)
+    except ValueError:
+        pass
 
-def safe_urlopen(req_or_url: str | urllib.request.Request, timeout: float = 12.0):
-    """Opens a URL using an opener hardened against SSRF redirects."""
-    opener = urllib.request.build_opener(SafeSSRFRedirectHandler)
-    return opener.open(req_or_url, timeout=timeout)
+    if is_legacy_fixture:
+        allowed_root = legacy_root
+    else:
+        allowed_root = root
 
+    try:
+        relative = raw.relative_to(allowed_root)
+    except ValueError as exc:
+        raise ValueError("Local discovery paths must stay inside data/leads_dropzone (or use a bundled legacy sample fixture)") from exc
+
+    if allowed_root.is_symlink():
+        raise ValueError("Local discovery root cannot be a symlink")
+    cursor = allowed_root
+    for part in relative.parts:
+        cursor = cursor / part
+        if cursor.is_symlink():
+            raise ValueError("Symlinked lead dropzone paths are not permitted")
+
+    try:
+        resolved = raw.resolve(strict=True)
+        resolved.relative_to(allowed_root.resolve())
+    except (OSError, ValueError) as exc:
+        raise ValueError("Local discovery path is missing or escapes the approved dropzone") from exc
+    if is_legacy_fixture and resolved.name not in legacy_allowed_names:
+        raise ValueError("Only the bundled legacy sample fixtures are permitted")
+    if expect_directory and not resolved.is_dir():
+        raise ValueError("Configured local discovery path must be a directory")
+    if not expect_directory and not resolved.is_file():
+        raise ValueError("Configured local discovery path must be a regular file")
+    return resolved
+
+def fetch_public_feed(url: str, *, max_bytes: int = MAX_FEED_BYTES, timeout: float = HTTP_TIMEOUT_SECONDS,
+                      resolver=None, socket_factory=None) -> bytes:
+    """Fetch a public HTTP(S) feed with DNS pinning, redirect revalidation, and a strict byte cap."""
+    dns_resolver = resolver or socket.getaddrinfo
+    connect_socket = socket_factory or socket.create_connection
+    current = url
+    visited: set[str] = set()
+    tls_context = ssl.create_default_context()
+
+    for redirect_count in range(MAX_REDIRECTS + 1):
+        if current in visited:
+            raise ValueError("Redirect loop detected while fetching source")
+        visited.add(current)
+        valid, error = validate_source_url(current)
+        if not valid:
+            raise ValueError(error)
+        parsed = urlsplit(current)
+        host = parsed.hostname or ""
+        scheme = parsed.scheme.lower()
+        port = parsed.port or (443 if scheme == "https" else 80)
+        try:
+            raw_answers = dns_resolver(host, port, type=socket.SOCK_STREAM)
+        except Exception as exc:
+            raise ValueError(f"DNS resolution failed for source host: {exc}") from exc
+
+        ips: list[str] = []
+        for answer in raw_answers:
+            try:
+                addr = answer[4][0]
+            except (IndexError, TypeError):
+                continue
+            if not _is_public_ip(addr):
+                raise ValueError(f"SSRF Protection: hostname resolves to a non-public address ({addr}).")
+            if addr not in ips:
+                ips.append(addr)
+        if not ips:
+            try:
+                ipaddress.ip_address(host)
+                if _is_public_ip(host):
+                    ips = [host]
+            except ValueError:
+                pass
+        if not ips:
+            raise ValueError("Source hostname did not resolve to a public IP address")
+
+        request_path = parsed.path or "/"
+        if parsed.query:
+            request_path += "?" + parsed.query
+        host_header = f"[{host}]" if ":" in host and not host.startswith("[") else host
+        if parsed.port:
+            host_header = f"{host_header}:{parsed.port}"
+        headers = {
+            "Host": host_header,
+            "User-Agent": "SOLOEARN-DiscoveryAgent/1.0 (Private Workbench; Local-First)",
+            "Accept": "application/rss+xml, application/atom+xml, application/json, application/xml, text/xml, */*",
+            "Accept-Encoding": "identity",
+            "Connection": "close",
+        }
+
+        last_error = None
+        response = None
+        conn = None
+        for ip in ips:
+            try:
+                sock = connect_socket((ip, port), timeout=timeout)
+                sock.settimeout(timeout)
+                if scheme == "https":
+                    sock = tls_context.wrap_socket(sock, server_hostname=host)
+                conn = http.client.HTTPConnection(host, port, timeout=timeout)
+                conn.sock = sock  # connect to the validated IP; preserve Host and TLS SNI as the domain
+                conn.putrequest("GET", request_path, skip_host=True, skip_accept_encoding=True)
+                for key, value in headers.items():
+                    conn.putheader(key, value)
+                conn.endheaders()
+                response = conn.getresponse()
+                break
+            except Exception as exc:
+                last_error = exc
+                if conn is not None:
+                    conn.close()
+                conn = None
+                response = None
+        if response is None:
+            raise ValueError(f"Could not connect to public feed host: {last_error}")
+
+        try:
+            if response.status in (301, 302, 303, 307, 308):
+                location = response.getheader("Location")
+                if not location:
+                    raise ValueError("Redirect response did not include a Location header")
+                if redirect_count >= MAX_REDIRECTS:
+                    raise ValueError("Too many redirects while fetching source")
+                next_url = urljoin(current, location)
+                valid, error = validate_source_url(next_url)
+                if not valid:
+                    raise ValueError(f"Redirect blocked: {error}")
+                current = next_url
+                continue
+            if response.status < 200 or response.status >= 300:
+                raise ValueError(f"Feed server returned HTTP {response.status}")
+            content_length = response.getheader("Content-Length")
+            if content_length and int(content_length) > max_bytes:
+                raise ValueError(f"Feed exceeds maximum allowed size ({max_bytes} bytes)")
+            body = response.read(max_bytes + 1)
+            if len(body) > max_bytes:
+                raise ValueError(f"Feed exceeds maximum allowed size ({max_bytes} bytes)")
+            return body
+        finally:
+            if conn is not None:
+                conn.close()
+
+    raise ValueError("Unable to fetch source after redirect processing")
 
 def parse_feed_xml(xml_content: str | bytes, source_name: str = "RSS Feed") -> list[dict[str, Any]]:
     """
     Parses RSS 2.0 or Atom XML feed content safely using standard library ElementTree.
-    Hardened against XML External Entity (XXE) and Billion Laughs entity expansion attacks.
     """
     if isinstance(xml_content, str):
         xml_bytes = xml_content.encode("utf-8")
     else:
         xml_bytes = xml_content
 
-    # Strict XXE and DOCTYPE entity expansion defense
-    lower_bytes = xml_bytes.lower()
-    if b"<!doctype" in lower_bytes or b"<!entity" in lower_bytes or b"system " in lower_bytes or b"public " in lower_bytes:
-        raise ValueError("XML Parsing Security Violation: DOCTYPE and ENTITY declarations are forbidden (XXE protection).")
-
+    if len(xml_bytes) > MAX_FEED_BYTES:
+        raise ValueError(f"XML feed exceeds maximum allowed size ({MAX_FEED_BYTES} bytes)")
+    upper_xml = xml_bytes.upper()
+    if b"<!DOCTYPE" in upper_xml or b"<!ENTITY" in upper_xml:
+        raise ValueError("XML DTD and entity declarations are not permitted")
     try:
         root = ET.fromstring(xml_bytes)
     except Exception as exc:
@@ -228,13 +391,18 @@ def parse_feed_xml(xml_content: str | bytes, source_name: str = "RSS Feed") -> l
                         "source": source_name,
                     })
 
+    if len(items) > MAX_FEED_ITEMS:
+        raise ValueError(f"XML feed exceeds maximum item count ({MAX_FEED_ITEMS})")
     return items
 
 
 def parse_json_leads(json_content: str | bytes, source_name: str = "JSON API") -> list[dict[str, Any]]:
-    """Parses JSON data containing opportunities list or feed."""
+    """Parses JSON data containing opportunities list or feed with input limits."""
+    raw_bytes = json_content.encode("utf-8") if isinstance(json_content, str) else json_content
+    if len(raw_bytes) > MAX_FEED_BYTES:
+        raise ValueError(f"JSON feed exceeds maximum allowed size ({MAX_FEED_BYTES} bytes)")
     try:
-        data = json.loads(json_content)
+        data = json.loads(raw_bytes)
     except Exception as exc:
         raise ValueError(f"Invalid JSON lead payload: {exc}") from exc
 
@@ -249,6 +417,8 @@ def parse_json_leads(json_content: str | bytes, source_name: str = "JSON API") -
         if not raw_list and "title" in data:
             raw_list = [data]
 
+    if len(raw_list) > MAX_FEED_ITEMS:
+        raise ValueError(f"JSON feed exceeds maximum item count ({MAX_FEED_ITEMS})")
     items: list[dict[str, Any]] = []
     for entry in raw_list:
         if not isinstance(entry, dict):
@@ -338,6 +508,23 @@ class DiscoveryEngine:
             url = str(item.get("url", "")).strip()
             source = str(item.get("source") or source_name).strip()
 
+            if not title:
+                batch.unsuitable_skipped += 1
+                continue
+            if url:
+                url_ok, url_error = validate_source_url(url)
+                if not url_ok:
+                    batch.unsuitable_skipped += 1
+                    batch.leads.append(DiscoveredLead(
+                        title=title, source=source, url="", description=desc,
+                        amount_inr=0.0, estimated_hours=1.0, skill_match=0.0,
+                        payment_confidence=0.0, risk_level=10.0,
+                        source_permitted=source_permitted, score=0.0,
+                        content_hash=compute_content_hash(title, desc),
+                        is_suitable=False, rejection_reason=f"Unsafe opportunity link: {url_error}",
+                    ))
+                    continue
+
             c_hash = compute_content_hash(title, desc)
 
             # Deduplication
@@ -365,9 +552,9 @@ class DiscoveryEngine:
                 batch.leads.append(lead)
                 continue
 
-            # Capability Evaluation
+            # Capability Evaluation: any unsupported requirement makes this lead review-only/rejected.
             cap_result = CapabilityMatcher.match(title, desc)
-            if not cap_result.is_suitable and cap_result.skill_match < 0.25:
+            if not cap_result.is_suitable:
                 batch.unsuitable_skipped += 1
                 lead = DiscoveredLead(
                     title=title,
@@ -388,9 +575,20 @@ class DiscoveryEngine:
                 batch.leads.append(lead)
                 continue
 
-            # Amount and Hours determination
-            amount = float(item.get("amount_inr") or extract_budget_inr(f"{title} {desc}"))
-            hours = float(item.get("estimated_hours") or max(2.0, min(10.0, round(len(desc.split()) / 50.0 + 2.0, 1))))
+            # Unknown budgets remain unknown (₹0 sentinel); never invent a ₹5,000 budget.
+            raw_amount = item.get("amount_inr")
+            try:
+                amount = float(raw_amount) if raw_amount not in (None, "") else extract_budget_inr(f"{title} {desc}")
+            except (TypeError, ValueError):
+                amount = 0.0
+            if not math.isfinite(amount) or amount < 0:
+                amount = 0.0
+            try:
+                hours = float(item.get("estimated_hours") or max(2.0, min(10.0, round(len(desc.split()) / 50.0 + 2.0, 1))))
+            except (TypeError, ValueError):
+                hours = max(2.0, min(10.0, round(len(desc.split()) / 50.0 + 2.0, 1)))
+            if not math.isfinite(hours) or hours <= 0:
+                hours = max(2.0, min(10.0, round(len(desc.split()) / 50.0 + 2.0, 1)))
 
             # Risk & Payment Security Analysis
             risk_result = RiskAnalyzer.analyze(
@@ -482,51 +680,38 @@ class DiscoveryEngine:
         raw_items: list[dict[str, Any]] = []
 
         try:
-            # 1. Local folder dropzone
+            # Local files and folders are confined to the explicitly approved dropzone.
             if s_type == "local_folder":
-                target_path = Path(s_target)
-                if not target_path.exists():
-                    target_path = LEADS_DROPZONE_DIR
-                for fpath in target_path.glob("*"):
+                target_path = safe_dropzone_path(s_target or LEADS_DROPZONE_DIR, expect_directory=True)
+                for fpath in target_path.iterdir():
+                    if fpath.is_symlink() or not fpath.is_file():
+                        continue
+                    if fpath.suffix.lower() not in (".json", ".xml", ".rss", ".atom"):
+                        continue
+                    content = fpath.read_bytes()
+                    if len(content) > MAX_FEED_BYTES:
+                        continue
                     if fpath.suffix.lower() == ".json":
-                        raw_items.extend(parse_json_leads(fpath.read_text(encoding="utf-8"), s_name))
-                    elif fpath.suffix.lower() in (".xml", ".rss", ".atom"):
-                        raw_items.extend(parse_feed_xml(fpath.read_text(encoding="utf-8"), s_name))
+                        raw_items.extend(parse_json_leads(content, s_name))
+                    else:
+                        raw_items.extend(parse_feed_xml(content, s_name))
+                    if len(raw_items) > MAX_FEED_ITEMS:
+                        raise ValueError(f"Local dropzone exceeds maximum item count ({MAX_FEED_ITEMS})")
 
-            # 2. Remote RSS / Atom Feed
-            elif s_type in ("rss", "atom"):
-                # If target is local file for testing
-                local_f = Path(s_target)
-                if local_f.exists() and local_f.is_file():
+            elif s_type in ("rss", "atom", "json_api"):
+                # A local file is permitted only from data/leads_dropzone; all other targets must be public URLs.
+                local_candidate = Path(s_target)
+                if local_candidate.exists():
+                    local_f = safe_dropzone_path(local_candidate, expect_directory=False)
                     content = local_f.read_bytes()
+                    if len(content) > MAX_FEED_BYTES:
+                        raise ValueError(f"Feed exceeds maximum allowed size ({MAX_FEED_BYTES} bytes)")
                 else:
-                    valid, err = validate_source_url(s_target)
-                    if not valid:
-                        raise ValueError(err)
-                    req = urllib.request.Request(
-                        s_target,
-                        headers={"User-Agent": "SOLOEARN-DiscoveryAgent/1.0 (Private Workbench; Local-First)"},
-                    )
-                    with safe_urlopen(req, timeout=12.0) as resp:
-                        content = resp.read()
-                raw_items = parse_feed_xml(content, s_name)
-
-            # 3. Remote JSON API
-            elif s_type == "json_api":
-                local_f = Path(s_target)
-                if local_f.exists() and local_f.is_file():
-                    content = local_f.read_bytes()
+                    content = fetch_public_feed(s_target)
+                if s_type == "json_api":
+                    raw_items = parse_json_leads(content, s_name)
                 else:
-                    valid, err = validate_source_url(s_target)
-                    if not valid:
-                        raise ValueError(err)
-                    req = urllib.request.Request(
-                        s_target,
-                        headers={"User-Agent": "SOLOEARN-DiscoveryAgent/1.0 (Private Workbench; Local-First)"},
-                    )
-                    with safe_urlopen(req, timeout=12.0) as resp:
-                        content = resp.read()
-                raw_items = parse_json_leads(content, s_name)
+                    raw_items = parse_feed_xml(content, s_name)
 
             else:
                 raise ValueError(f"Unsupported discovery source type: {s_type}")

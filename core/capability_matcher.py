@@ -70,19 +70,15 @@ class CapabilityMatcher:
             if re.search(r"\b" + re.escape(kw) + r"\b", text)
         ]
 
-        # Scoring logic
-        if unsupported_found and not matched_caps:
-            score = 0.1
-            explanation = f"Job requires unsupported domain capabilities: {', '.join(unsupported_found[:3])}."
-            is_suitable = False
-        elif unsupported_found and matched_caps:
-            # Mixed requirements (e.g., CSV export for a React Native app)
-            score = round(max(0.2, 0.4 + (len(matched_caps) * 0.1) - (len(unsupported_found) * 0.15)), 2)
+        # Scoring logic. Any unsupported requirement forces manual review/rejection;
+        # matching one supported subtask must never make an out-of-scope project suitable.
+        if unsupported_found:
+            score = min(0.2, round(len(matched_caps) * 0.04, 2))
             explanation = (
-                f"Mixed requirements: matches {len(matched_caps)} data capabilities, but mentions "
-                f"unsupported technologies: {', '.join(unsupported_found[:2])}."
+                "Unsupported requirement(s) detected; the opportunity is not eligible for automatic execution: "
+                f"{', '.join(unsupported_found[:4])}."
             )
-            is_suitable = score >= 0.5
+            is_suitable = False
         elif matched_caps:
             # Clean match on verified automation capabilities
             base_score = 0.65

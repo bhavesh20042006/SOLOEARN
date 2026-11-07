@@ -26,7 +26,6 @@ from core.db import (
     verify_invoice_payment,
 )
 from core.discovery_engine import (
-    SafeSSRFRedirectHandler,
     parse_feed_xml,
     validate_source_url,
 )
@@ -79,7 +78,7 @@ class Milestone5RevenueOpsTests(unittest.TestCase):
         """
         with self.assertRaises(ValueError) as ctx:
             parse_feed_xml(evil_xml)
-        self.assertIn("XXE protection", str(ctx.exception))
+        self.assertTrue("entity declarations are not permitted" in str(ctx.exception) or "XXE" in str(ctx.exception))
 
     # --- Concurrency & Atomic Database Locking ---
 
