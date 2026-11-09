@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 """
-SOLOEARN Indian Tax Intelligence Engine (v0.6.1 Hardened)
+SOLOEARN Indian Tax Intelligence Engine (v0.6.1.2 Hardened)
 Implements versioned Indian Income-Tax calculations under the Income-tax Act, 2025 (FY 2026-27 / AY 2027-28):
 - Section 202 individual slabs.
 - Section 156 resident rebate & marginal relief.
@@ -20,6 +20,35 @@ STANDARD_CESS_RATE = 0.04
 GST_SERVICE_THRESHOLD_INR = 2000000.0      # Standard threshold in most states
 GST_WARNING_THRESHOLD_INR = 1800000.0      # Early alert threshold for CA review
 GST_SPECIAL_CATEGORY_THRESHOLD_INR = 1000000.0  # Special category states
+
+SUPPORTED_TAX_YEAR = "2026-27"
+SUPPORTED_TAX_REGIME = "new_2025"
+SUPPORTED_ENTITY_TYPE = "individual_sole_proprietor"
+
+
+def validate_tax_profile(profile: dict[str, Any] | None) -> dict[str, str]:
+    """Fail closed for taxpayer configurations the current estimate engine does not model."""
+    if not profile:
+        return {
+            "entity_type": SUPPORTED_ENTITY_TYPE,
+            "residential_status": "resident",
+            "tax_year": SUPPORTED_TAX_YEAR,
+            "regime": SUPPORTED_TAX_REGIME,
+        }
+    expected = {
+        "entity_type": SUPPORTED_ENTITY_TYPE,
+        "residential_status": "resident",
+        "tax_year": SUPPORTED_TAX_YEAR,
+        "regime": SUPPORTED_TAX_REGIME,
+    }
+    for key, supported_value in expected.items():
+        actual = str(profile.get(key, supported_value)).strip().lower()
+        if actual != supported_value.lower():
+            raise ValueError(
+                f"SOLOEARN tax estimates currently support only {key}={supported_value!r}; "
+                f"the saved profile contains {actual!r}. Update the profile or obtain CA review."
+            )
+    return expected
 
 # Surcharge thresholds & base benchmarks under Section 202 default regime
 SURCHARGE_THRESHOLDS = [
@@ -109,6 +138,13 @@ def compute_income_tax_india_2026(
     Computes estimated Indian income tax for a resident individual sole proprietor under
     Section 202, Section 156 (rebate/marginal relief), surcharge bands, and 4% cess.
     """
+    if str(regime).strip() != SUPPORTED_TAX_REGIME:
+        raise ValueError(
+            f"Unsupported tax regime {regime!r}; this estimate engine currently supports "
+            f"only {SUPPORTED_TAX_REGIME!r}."
+        )
+    if isinstance(taxable_income, bool):
+        raise ValueError("Taxable income must be numeric, not boolean")
     if taxable_income <= 0 or math.isnan(taxable_income) or math.isinf(taxable_income):
         return {
             "taxable_income": 0.0,
@@ -170,6 +206,7 @@ def compute_income_tax_india_2026(
 def compute_business_incremental_tax(
     business_taxable_income: float,
     other_annual_income: float = 0.0,
+    regime: str = SUPPORTED_TAX_REGIME,
 ) -> dict[str, float]:
     """
     Computes the incremental income tax directly attributable to business income,
@@ -179,8 +216,8 @@ def compute_business_incremental_tax(
     o_income = max(0.0, float(other_annual_income))
     tot_income = b_income + o_income
 
-    tax_total = compute_income_tax_india_2026(tot_income)
-    tax_other = compute_income_tax_india_2026(o_income)
+    tax_total = compute_income_tax_india_2026(tot_income, regime=regime)
+    tax_other = compute_income_tax_india_2026(o_income, regime=regime)
     inc_tax = max(0.0, round(tax_total["total_tax"] - tax_other["total_tax"], 2))
 
     return {
@@ -197,11 +234,19 @@ def compute_business_incremental_tax(
 def compute_required_pretax_profit(
     target_posttax_annual: float = 1200000.0,
     other_annual_income: float = 0.0,
+    regime: str = SUPPORTED_TAX_REGIME,
 ) -> float:
     """
     Computes the taxable business profit required to yield `target_posttax_annual`
     after attributable income tax, taking into account other personal income.
     """
+    if str(regime).strip() != SUPPORTED_TAX_REGIME:
+        raise ValueError(
+            f"Unsupported tax regime {regime!r}; this estimate engine currently supports "
+            f"only {SUPPORTED_TAX_REGIME!r}."
+        )
+    if isinstance(target_posttax_annual, bool) or not math.isfinite(float(target_posttax_annual)):
+        raise ValueError("Target post-tax income must be a finite numeric amount")
     if target_posttax_annual <= 0:
         return 0.0
 
@@ -221,7 +266,7 @@ def compute_required_pretax_profit(
     high = max(50000000.0, (target + other) * 3.0)
     for _ in range(70):
         mid = (low + high) / 2.0
-        inc_res = compute_business_incremental_tax(mid, other)
+        inc_res = compute_business_incremental_tax(mid, other, regime=regime)
         posttax = mid - inc_res["incremental_business_tax"]
         if abs(posttax - target) < 0.001:
             return round(mid, 2)

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 import os
 from dataclasses import asdict
 from pathlib import Path
@@ -95,7 +96,7 @@ ensure_directories()
 init_db()
 
 st.title("🧠 SOLOEARN")
-st.caption("Private, local-first income-workflow workbench · single owner · zero paid API dependency")
+st.caption("SOLOEARN v0.6.1.2 · private, local-first income-workflow workbench · single owner · zero paid API dependency")
 st.warning(
     "This is an assisted-work MVP, not an unattended money machine. It does not scrape marketplaces, "
     "send proposals, accept contracts, submit work, make purchases, or access bank credentials. "
@@ -776,14 +777,22 @@ with tabs[4]:
                         st.error("Owner confirmation is required.")
 
         with st.expander("👤 Personal Tax Profile (Income-tax Act, 2025)"):
+            st.caption("Current estimate support is limited to a resident individual sole proprietor using the default new regime for tax year 2026–27. Special-rate income (including capital gains), non-resident status, other entity types, and other regimes require CA review and are not modelled.")
             active_prof = get_active_tax_profile()
             with st.form("tax_profile_form"):
+                other_pan_turnover = st.number_input(
+                    "Additional FY Aggregate Turnover under Same PAN Outside SOLOEARN (₹, ex-GST)",
+                    min_value=0.0,
+                    value=float(active_prof.get("other_pan_aggregate_turnover_inr", 0.0)) if active_prof else 0.0,
+                    step=10000.0,
+                    help="Include other proprietorship/business turnover under the same PAN and supplies not invoiced through SOLOEARN. This is needed for a more complete GST threshold estimate.",
+                )
                 other_inc = st.number_input(
                     "Other Annual Taxable Income (₹)",
                     min_value=0.0,
                     value=float(active_prof["other_annual_income_inr"]) if active_prof else 0.0,
                     step=10000.0,
-                    help="Includes salary, interest, capital gains, or rental income to compute incremental business tax bracket."
+                    help="Enter other annual ordinary taxable income after applicable adjustments. Do not include special-rate capital gains or other special-rate income; this estimator does not model those."
                 )
                 adv_tax = st.number_input(
                     "Advance Tax Paid YTD (₹)",
@@ -800,6 +809,7 @@ with tabs[4]:
                 if st.form_submit_button("Update Tax Profile"):
                     upsert_tax_profile(
                         other_annual_income_inr=other_inc,
+                        other_pan_aggregate_turnover_inr=other_pan_turnover,
                         advance_tax_paid_inr=adv_tax,
                         tds_credits_inr=tds_credit,
                     )
@@ -819,10 +829,82 @@ with tabs[4]:
                     st.error(f"Import error: {exc}")
 
         st.markdown("##### Unreconciled Bank Entries")
-        unreconciled = list_unreconciled_statement_rows(limit=5)
+        unreconciled = list_unreconciled_statement_rows(limit=20)
         if unreconciled:
+            pending_invoice_rows = [i for i in list_invoices() if i["status"] in {"issued", "payment_pending"}]
+            expense_rows = list_expenses(limit=500)
             for u in unreconciled:
-                st.write(f"• **{u['tx_date']}** | {u['tx_type'].upper()}: ₹{u['amount_inr']:,.2f} | *{u['description'][:35]}* (Ref: `{u['bank_ref'] or 'N/A'}`)")
+                st.write(
+                    f"**#{u['id']} · {u['tx_date']}** | {u['tx_type'].upper()}: "
+                    f"₹{u['amount_inr']:,.2f} | *{u['description'][:80]}* "
+                    f"(Ref: `{u['bank_ref'] or 'N/A'}`)"
+                )
+                default_entities = (
+                    ["invoice", "other"] if u["tx_type"] == "credit"
+                    else ["expense", "owner_draw", "tax_payment", "gst_payment", "other"]
+                )
+                with st.form(f"reconcile_bank_row_{u['id']}"):
+                    chosen_entity = st.selectbox(
+                        "Match bank entry to",
+                        options=default_entities,
+                        key=f"reconcile_type_{u['id']}",
+                    )
+                    chosen_entity_id = ""
+                    if chosen_entity == "invoice":
+                        invoice_map = {
+                            f"{i['invoice_number']} · {i['client_name']} · ₹{i['amount_total']:,.2f}": i["invoice_number"]
+                            for i in pending_invoice_rows
+                        }
+                        if invoice_map:
+                            selected_invoice_label = st.selectbox(
+                                "Invoice",
+                                options=list(invoice_map),
+                                key=f"reconcile_invoice_{u['id']}",
+                            )
+                            chosen_entity_id = invoice_map[selected_invoice_label]
+                        else:
+                            st.warning("No unpaid invoices are available. Choose 'other' or create the correct invoice first.")
+                            chosen_entity_id = ""
+                    elif chosen_entity == "expense":
+                        expense_map = {
+                            f"EXP-{e['id']:05d} · {e['vendor']} · ₹{e['amount_inr']:,.2f}": f"EXP-{e['id']:05d}"
+                            for e in expense_rows
+                        }
+                        if expense_map:
+                            selected_expense_label = st.selectbox(
+                                "Expense",
+                                options=list(expense_map),
+                                key=f"reconcile_expense_{u['id']}",
+                            )
+                            chosen_entity_id = expense_map[selected_expense_label]
+                        else:
+                            st.warning("No recorded expenses are available to match.")
+                    else:
+                        chosen_entity_id = st.text_input(
+                            "Reference / explanation",
+                            value=u["bank_ref"] or f"Statement row {u['id']}",
+                            key=f"reconcile_other_{u['id']}",
+                        )
+                    owner_ok = st.checkbox(
+                        "I independently checked this exact entry against my bank statement",
+                        value=False,
+                        key=f"reconcile_confirm_{u['id']}",
+                    )
+                    do_reconcile = st.form_submit_button("Confirm reconciliation")
+                    if do_reconcile:
+                        try:
+                            if not chosen_entity_id:
+                                raise ValueError("Select or enter the matching invoice, expense, or explanation.")
+                            reconcile_statement_row(
+                                row_id=int(u["id"]),
+                                entity_type=chosen_entity,
+                                entity_id=chosen_entity_id,
+                                owner_confirmed=owner_ok,
+                            )
+                            st.success(f"Bank row #{u['id']} reconciled.")
+                            st.rerun()
+                        except Exception as exc:
+                            st.error(f"Reconciliation blocked: {exc}")
         else:
             st.caption("Zero unreconciled bank rows. All imported transactions matched.")
 

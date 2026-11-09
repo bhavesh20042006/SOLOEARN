@@ -1,10 +1,10 @@
-# SOLOEARN v0.5.3 — Private Local Workbench
+# SOLOEARN v0.6.1.2 — Net-Profit-First Private Workbench
 
 A local-first, single-owner prototype for organizing legitimate paid-work opportunities and producing a first repeatable deliverable: a CSV business-analysis pack.
 
 **Important:** this is not AGI and it does not guarantee income. It is not an unattended earning bot. This release does not scrape job sites, send proposals, accept contracts, submit deliverables, make purchases, move money, log in to a bank, or access personal files. Human approval is required for external actions.
 
-## What works in v0.5.3
+## What works in v0.6.1.2
 
 - Local Streamlit dashboard bound to `127.0.0.1` only.
 - SQLite database for opportunities, tasks, revenue entries and an audit log.
@@ -61,11 +61,12 @@ A local-first, single-owner prototype for organizing legitimate paid-work opport
     - Interrupted jobs are reset to a safe state and flagged for manual review; they are not automatically resumed.
     - Health heartbeat file (`data/daemon_heartbeat.json`).
     - This scheduler does not autonomously execute client jobs, accept contracts, send proposals, submit work, or process payments.
-  - **Gross Paid Revenue Target Optimizer (illustrative goal: ₹1,00,000 / month)**:
-    - Tracks owner-confirmed gross payments recorded in the local ledger and displays outstanding invoices and uncontracted pipeline separately.
-    - Illustrative billing mix: 8 analytics jobs (₹40,000) + 3 data engineering jobs (₹45,000) + 1 dashboard job (₹20,000) = ₹1,05,000 gross billed, assuming those prices and customer demand.
-    - This is arithmetic only—not validated market demand, a capacity guarantee, net profit, take-home income, or a promise that the system will reach the target.
-    - Hourly yield ranking is an estimate based on supplied opportunity data, not a payment probability model trained on historical outcomes.
+  - **Net Profit Target Optimizer (planning target: ₹1,00,000 / month after business costs and estimated income tax)**:
+    - Separates quoted pipeline, contracted backlog, invoices, cleared owner-confirmed receipts, operating expenses, estimated tax, and available owner cash.
+    - Uses a versioned tax estimate for a resident individual sole proprietor under the default new regime for tax year 2026–27; other regimes, non-resident status, other entity types and special-rate income are rejected for estimate purposes pending CA review.
+    - Calculates planning receipts needed from observed operating costs and tax-reviewed deductible costs. GST collected is excluded from income; GST aggregate turnover includes non-cancelled SOLOEARN invoices for the tax year plus owner-entered other same-PAN turnover.
+    - Displays estimated after-tax profit and incremental-tax-adjusted project counts. Catalog prices, delivery hours and direct costs remain assumptions until measured from real jobs.
+    - This is a planning model, not a validated demand forecast, accounting opinion, tax filing, bank integration, take-home guarantee, or promise that the system will reach the target.
 - Optional local Ollama connection for aggregate-only report observations. Proposal drafts are deterministic templates; the local model is not used to create external proposal claims.
 - CSV workbench that creates:
   - `business_analysis.xlsx` (cleaned data, data-quality profile, numeric summary)
@@ -205,6 +206,18 @@ Open this folder in Antigravity. The suggested next development prompt is in `AN
 
 Claude Pro can be used interactively through Claude Code for development if your plan includes it. Anthropic currently includes Claude Code access with Pro, but that is a developer tool with subscription limits, not a general API credential to embed into a background service. The runtime in this prototype talks only to Ollama at localhost. Antigravity is the development environment, not the 24/7 earnings runtime.
 
+## M6.1.2 financial reconciliation safeguards
+
+The v0.6.1.2 release includes 151 automated tests. See `SOLOEARN_Milestone6.1.2_test_results_final.txt` for the captured run. The Linux audit environment does not include Streamlit, so the live dashboard must still be smoke-tested on Windows.
+
+
+- A bank credit cannot mark an invoice paid unless the exact gross statement amount equals the full invoice total. A debit cannot mark an expense paid unless it exactly matches the full recorded expense amount. Partial settlements are rejected and left unreconciled.
+- A statement row is one-use; invalid entity matches and repeated reconciliation are rejected before ledger mutation.
+- Other bank inflows/outflows can be reconciled to cash-only ledger events and do not become business income.
+- Invoice refunds split the gross refund proportionally into ex-GST service refund and GST-refund entries. Service refunds reduce realized receipts/profit; GST refunds reduce the GST reserve.
+- Unsupported tax profiles fail closed instead of silently using the new-regime calculation.
+- Negative operating results remain negative; they are not clipped to zero. Taxable-loss set-off/carry-forward is not inferred by this estimator.
+
 ## Security boundaries
 
 - Do not paste passwords, API keys, cookies, bank login details or personal documents into the app.
@@ -214,7 +227,7 @@ Claude Pro can be used interactively through Claude Code for development if your
 - Follow each platform's rules for APIs, automation and outreach.
 - Back up the `data/` folder; it contains the local ledger.
 
-## Verified scope and current limitations (v0.5.3)
+## Verified scope and current limitations (v0.6.1.2)
 
 - Four deterministic service workflows are implemented: analytics, data engineering, interactive HTML dashboard generation, and CSV reconciliation automation. There is no separate fifth software-automation executor in this release.
 - The business automation service is intentionally limited to CSV header normalization, exact duplicate removal, and a summary report. It does not automate arbitrary external business systems.
@@ -223,7 +236,12 @@ Claude Pro can be used interactively through Claude Code for development if your
 - Payment status is owner-attested from a bank statement. There is no bank API, account connection, automatic UTR validation, or money movement.
 - Invoice output is a local HTML draft. Confirm agreed scope, client identity, applicable tax registration, and legal invoice requirements before sending it; this app is not tax or legal advice.
 - Direct manual paid-revenue entries are disabled; a paid receipt is recorded only through owner-confirmed invoice payment workflow. This remains an owner attestation, not an independent bank verification.
-- The ₹1,00,000 goal is a **gross paid-revenue planning target**, not guaranteed earnings or net take-home income. Price assumptions and the sample service mix are not evidence of customer demand.
-- This project has not demonstrated a repeatable paying-customer acquisition channel or sustained monthly revenue. The first commercial validation milestone is to complete and collect payment for one genuine client project.
+- The ₹1,00,000 goal is an **after-business-expense and estimated-income-tax planning target**. It is not guaranteed or yet achieved; prices and delivery times remain unvalidated assumptions.
+- M6.1.2 bank-statement reconciliation rejects partial invoice and expense payments rather than marking the full item paid. Partial payment allocation is not implemented yet.
+- Refunds must be recorded as ex-GST service refund plus GST-refund components; the invoice refund helper records an owner-confirmed ledger adjustment but does not initiate or independently verify a bank transfer.
+- The tax estimate currently supports only a resident individual sole proprietor, default new regime, tax year 2026–27 and ordinary-rate taxable income. Other regimes, non-resident status, entities, and special-rate income are not modelled. A Chartered Accountant must review the tax profile and treatment.
+- GST threshold monitoring includes non-cancelled SOLOEARN invoice subtotals issued in the tax year plus owner-entered other aggregate turnover under the same PAN. It remains an estimate; the owner/CA must confirm all taxable, exempt, export and other turnover, applicable state threshold and exceptions.
+- Bank reconciliation and payment status rely on owner attestation after checking a bank statement. There is no bank API, independent UTR validation, automatic payment collection or money movement.
+- This project has not demonstrated a repeatable paying-customer acquisition channel, genuine paid customer, or sustained monthly profit. The first commercial validation milestone is to complete and collect payment for one genuine client project.
 
 Future work should prioritize evidence-backed client acquisition, independently validated service outputs, secure supported integrations, and operational monitoring. Do not enable automatic contract acceptance, proposal sending, or financial actions without platform authorization and tested safeguards.

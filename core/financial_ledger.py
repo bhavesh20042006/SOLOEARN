@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 """
-SOLOEARN Financial Foundation & Ledger Engine (M6.0)
+SOLOEARN Financial Foundation & Ledger Engine (M6.1.2)
 Implements:
 1. Append-only financial transaction ledger with integer paise / exact arithmetic.
 2. Comprehensive business expense registration and categorization.
@@ -20,14 +20,17 @@ from pathlib import Path
 from typing import Any
 
 from core.db import connect, utc_now, get_bank_opening_balance, get_active_tax_profile
-from core.tax_engine import compute_business_incremental_tax
+from core.tax_engine import compute_business_incremental_tax, validate_tax_profile
 
 DEFAULT_WORKING_CAPITAL_BUFFER_INR = 25000.0
 
 VALID_LEDGER_TX_TYPES = {
     "client_receipt",
     "platform_fee",
-    "refund",
+    "refund",  # Client refund excluding GST; use gst_refund for the tax component.
+    "gst_refund",
+    "other_cash_in",
+    "other_cash_out",
     "direct_cost",
     "expense",
     "gst_collected",
@@ -115,6 +118,116 @@ def record_ledger_transaction(
         tx_id = int(cur.lastrowid)
 
     return tx_id
+
+
+def record_invoice_refund(
+    invoice_number: str,
+    gross_refund_inr: float,
+    refund_reference: str,
+    owner_confirmed: bool = False,
+    tx_date: str = "",
+) -> dict[str, Any]:
+    """
+    Records a client refund as separate ex-GST service refund and GST-refund entries.
+    Cumulative allocation is proportional to the invoice subtotal/tax and cannot exceed
+    the original gross invoice total. This is a ledger record, not a bank transfer.
+    """
+    if owner_confirmed is not True:
+        raise ValueError("Recording a refund requires explicit owner confirmation")
+    if not isinstance(invoice_number, str) or not invoice_number.strip():
+        raise ValueError("Invoice number is required")
+    if not isinstance(refund_reference, str) or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,79}", refund_reference.strip()):
+        raise ValueError("Refund reference must be 1–80 safe alphanumeric/dot/underscore/hyphen characters")
+    if isinstance(gross_refund_inr, bool):
+        raise ValueError("Refund amount must be numeric, not boolean")
+    try:
+        gross_refund = round(float(gross_refund_inr), 2)
+    except (TypeError, ValueError, OverflowError) as exc:
+        raise ValueError("Refund amount must be a valid number") from exc
+    if not math.isfinite(gross_refund) or gross_refund <= 0:
+        raise ValueError("Refund amount must be a positive finite number")
+
+    eff_date = tx_date.strip() if tx_date else utc_now()[:10]
+    with connect() as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        inv = conn.execute(
+            "SELECT * FROM invoices WHERE invoice_number=?",
+            (invoice_number.strip(),),
+        ).fetchone()
+        if not inv:
+            raise ValueError(f"Invoice {invoice_number!r} was not found")
+        if inv["status"] != "paid":
+            raise ValueError("Only a paid invoice can be refunded")
+
+        subtotal = round(float(inv["amount_subtotal"]), 2)
+        gst_amount = round(float(inv["tax_amount"]), 2)
+        gross_total = round(float(inv["amount_total"]), 2)
+        if gross_total <= 0:
+            raise ValueError("Invoice total must be positive")
+
+        prior = conn.execute(
+            """SELECT tx_type, COALESCE(SUM(amount_inr), 0) AS total
+               FROM financial_transactions
+               WHERE reference_id LIKE ? AND tx_type IN ('refund','gst_refund')
+               GROUP BY tx_type""",
+            (f"REFUND:{invoice_number.strip()}:%",),
+        ).fetchall()
+        prior_by_type = {r["tx_type"]: round(float(r["total"] or 0.0), 2) for r in prior}
+        prior_ex = prior_by_type.get("refund", 0.0)
+        prior_gst = prior_by_type.get("gst_refund", 0.0)
+        prior_gross = round(prior_ex + prior_gst, 2)
+
+        ref_id = f"REFUND:{invoice_number.strip()}:{refund_reference.strip()}"
+        dupe = conn.execute(
+            "SELECT id FROM financial_transactions WHERE reference_id=? AND tx_type IN ('refund','gst_refund') LIMIT 1",
+            (ref_id,),
+        ).fetchone()
+        if dupe:
+            raise ValueError("This refund reference has already been recorded")
+
+        if prior_gross + gross_refund > gross_total + 0.009:
+            raise ValueError("Cumulative refunds cannot exceed the original invoice total")
+
+        new_cumulative_gross = round(prior_gross + gross_refund, 2)
+        new_cumulative_ex = min(subtotal, round(new_cumulative_gross * subtotal / gross_total, 2))
+        refund_ex = round(new_cumulative_ex - prior_ex, 2)
+        refund_gst = round(gross_refund - refund_ex, 2)
+        if refund_ex < 0 or refund_gst < 0 or refund_gst > gst_amount - prior_gst + 0.009:
+            raise ValueError("Refund tax allocation failed validation")
+
+        now = utc_now()
+        if refund_ex > 0:
+            conn.execute(
+                """INSERT INTO financial_transactions (
+                    tx_date, tx_type, amount_inr, amount_paise, currency,
+                    reference_id, description, is_reversal, created_at
+                ) VALUES (?, 'refund', ?, ?, 'INR', ?, ?, 0, ?)""",
+                (
+                    eff_date, refund_ex, inr_to_paise(refund_ex), ref_id,
+                    f"Ex-GST client refund for {invoice_number.strip()}", now,
+                ),
+            )
+        if refund_gst > 0:
+            conn.execute(
+                """INSERT INTO financial_transactions (
+                    tx_date, tx_type, amount_inr, amount_paise, currency,
+                    reference_id, description, is_reversal, created_at
+                ) VALUES (?, 'gst_refund', ?, ?, 'INR', ?, ?, 0, ?)""",
+                (
+                    eff_date, refund_gst, inr_to_paise(refund_gst), ref_id,
+                    f"GST component of client refund for {invoice_number.strip()}", now,
+                ),
+            )
+
+    return {
+        "invoice_number": invoice_number.strip(),
+        "refund_reference": refund_reference.strip(),
+        "gross_refund_inr": gross_refund,
+        "service_refund_ex_gst_inr": refund_ex,
+        "gst_refund_inr": refund_gst,
+        "status": "recorded_owner_confirmed",
+        "note": "This records a confirmed refund; it does not initiate or verify a bank transfer.",
+    }
 
 
 def list_ledger_transactions(limit: int = 100, tx_type: str = "") -> list[dict[str, Any]]:
@@ -478,20 +591,86 @@ def reconcile_statement_row(
     owner_confirmed: bool = True,
 ) -> dict[str, Any]:
     """
-    Reconciles a bank statement entry with an invoice or expense.
-    Marks the statement row as reconciled and verifies payment with owner attestation.
+    Reconciles a bank statement entry only after validating direction, entity,
+    outstanding invoice/expense amount, and duplicate references.
+
+    This release supports full invoice and expense settlement only. Partial
+    settlements are rejected rather than incorrectly marking the full item paid.
     """
-    if not owner_confirmed:
+    if owner_confirmed is not True:
         raise ValueError("Reconciliation requires explicit owner verification checkbox")
 
-    if entity_type not in {"invoice", "expense", "owner_draw", "tax_payment", "other"}:
+    allowed_entities = {"invoice", "expense", "owner_draw", "tax_payment", "gst_payment", "other"}
+    if entity_type not in allowed_entities:
         raise ValueError(f"Invalid matched entity type: '{entity_type}'")
 
     with connect() as conn:
+        conn.execute("BEGIN IMMEDIATE")
         st_row = conn.execute("SELECT * FROM bank_statement_rows WHERE id = ?", (row_id,)).fetchone()
         if not st_row:
             raise ValueError(f"Bank statement row ID {row_id} not found")
+        if int(st_row["is_reconciled"] or 0) == 1:
+            raise ValueError(f"Bank statement row #{row_id} has already been reconciled")
 
+        tx_direction = str(st_row["tx_type"]).lower()
+        amount = round(float(st_row["amount_inr"]), 2)
+        if amount <= 0 or not math.isfinite(amount):
+            raise ValueError("Bank statement amount must be positive and finite")
+
+        inv = None
+        exp = None
+        bank_ref = str(st_row["bank_ref"] or "").strip()[:120]
+
+        # Validate the matched entity before marking the statement row reconciled.
+        if entity_type == "invoice":
+            if tx_direction != "credit":
+                raise ValueError("An invoice can only be reconciled against a bank credit")
+            inv = conn.execute(
+                "SELECT * FROM invoices WHERE invoice_number = ? OR id = ?",
+                (str(entity_id), str(entity_id)),
+            ).fetchone()
+            if not inv:
+                raise ValueError(f"Invoice '{entity_id}' was not found")
+            if inv["status"] not in {"issued", "payment_pending"}:
+                raise ValueError(f"Invoice {inv['invoice_number']} is not awaiting payment")
+            expected = round(float(inv["amount_total"]), 2)
+            if abs(amount - expected) >= 0.01:
+                raise ValueError(
+                    f"Bank credit ₹{amount:,.2f} does not exactly settle invoice total "
+                    f"₹{expected:,.2f}. Partial/over-payments are not supported yet; "
+                    "leave this row unreconciled."
+                )
+            if bank_ref:
+                duplicate_ref = conn.execute(
+                    "SELECT id FROM invoices WHERE payment_reference=? AND status='paid' AND id<>? LIMIT 1",
+                    (bank_ref, int(inv["id"])),
+                ).fetchone()
+                if duplicate_ref:
+                    raise ValueError("This bank reference is already assigned to another paid invoice")
+
+        elif entity_type == "expense":
+            if tx_direction != "debit":
+                raise ValueError("An expense can only be reconciled against a bank debit")
+            exp_id_clean = str(entity_id).replace("EXP-", "").lstrip("0") or "0"
+            exp = conn.execute(
+                "SELECT * FROM expenses WHERE id = ?",
+                (int(exp_id_clean) if exp_id_clean.isdigit() else -1,),
+            ).fetchone()
+            if not exp:
+                raise ValueError(f"Expense '{entity_id}' was not found")
+            expected = round(float(exp["amount_inr"]), 2)
+            if abs(amount - expected) >= 0.01:
+                raise ValueError(
+                    f"Bank debit ₹{amount:,.2f} does not exactly settle expense "
+                    f"₹{expected:,.2f}. Partial expense payments are not supported yet; "
+                    "leave this row unreconciled."
+                )
+
+        elif entity_type in {"owner_draw", "tax_payment", "gst_payment"}:
+            if tx_direction != "debit":
+                raise ValueError(f"{entity_type} can only be reconciled against a bank debit")
+
+        # Validation succeeded; now atomically mark the row and increment its import count.
         conn.execute(
             """UPDATE bank_statement_rows
                SET is_reconciled = 1,
@@ -499,11 +678,12 @@ def reconcile_statement_row(
                    matched_entity_id = ?,
                    confirmed_by_owner = 1,
                    confirmed_at = ?
-               WHERE id = ?""",
+               WHERE id = ? AND is_reconciled = 0""",
             (entity_type, str(entity_id), utc_now(), row_id),
         )
+        if conn.total_changes < 1:
+            raise ValueError(f"Bank statement row #{row_id} could not be claimed for reconciliation")
 
-        # Update parent import reconciled count
         conn.execute(
             """UPDATE bank_statement_imports
                SET reconciled_count = reconciled_count + 1
@@ -511,117 +691,125 @@ def reconcile_statement_row(
             (st_row["import_id"],),
         )
 
-        # If matched to an invoice and the statement row is a credit, mark invoice paid and record in ledger
-        if entity_type == "invoice" and st_row["tx_type"] == "credit":
-            inv = conn.execute(
-                "SELECT * FROM invoices WHERE invoice_number = ? OR id = ?",
-                (str(entity_id), str(entity_id)),
+        now = utc_now()
+        ref_for_row = bank_ref or f"BANK-ROW-{row_id}"
+
+        if entity_type == "invoice" and inv is not None:
+            inv_id = int(inv["id"])
+            inv_num = str(inv["invoice_number"])
+            conn.execute(
+                """UPDATE invoices
+                   SET status='paid', paid_at=?, payment_reference=?, payment_verified_by_owner=1
+                   WHERE id=? AND status IN ('issued','payment_pending')""",
+                (now, ref_for_row, inv_id),
+            )
+            opp_id = int(inv["opportunity_id"])
+            task_id = inv["task_id"]
+            opp_row = conn.execute("SELECT status FROM opportunities WHERE id=?", (opp_id,)).fetchone()
+            if opp_row and opp_row["status"] in {"submitted_by_owner", "won", "invoiced"}:
+                conn.execute("UPDATE opportunities SET status='paid' WHERE id=?", (opp_id,))
+
+            rev_row = conn.execute(
+                "SELECT id FROM revenue WHERE description LIKE ? OR description LIKE ?",
+                (f"%{inv_num}%", f"%{ref_for_row}%"),
             ).fetchone()
-            if inv:
-                inv_id = inv["id"]
-                inv_num = inv["invoice_number"]
-                now = utc_now()
-                bank_ref = st_row["bank_ref"] or f"BANK-ROW-{row_id}"
+            if not rev_row:
                 conn.execute(
-                    """UPDATE invoices
-                       SET status = 'paid',
-                           paid_at = ?,
-                           payment_reference = ?,
-                           payment_verified_by_owner = 1
-                       WHERE id = ?""",
-                    (now, bank_ref, inv_id),
+                    """INSERT INTO revenue(opportunity_id, task_id, description, amount_inr, status, paid_at, created_at)
+                       VALUES (?, ?, ?, ?, 'paid', ?, ?)""",
+                    (
+                        opp_id, task_id,
+                        f"Reconciled payment for {inv_num} ({inv['client_name']}) - Ref: {ref_for_row}",
+                        float(inv["amount_total"]), now, now,
+                    ),
                 )
-                opp_id = int(inv["opportunity_id"])
-                task_id = inv["task_id"]
-                opp_row = conn.execute("SELECT status FROM opportunities WHERE id=?", (opp_id,)).fetchone()
-                if opp_row and opp_row["status"] in {"submitted_by_owner", "won", "invoiced"}:
-                    conn.execute("UPDATE opportunities SET status='paid' WHERE id=?", (opp_id,))
 
-                # Check if legacy revenue already exists for this invoice/payment ref
-                rev_row = conn.execute(
-                    "SELECT id FROM revenue WHERE description LIKE ? OR description LIKE ?",
-                    (f"%{inv_num}%", f"%{bank_ref}%"),
-                ).fetchone()
-                if not rev_row:
-                    conn.execute(
-                        """INSERT INTO revenue(opportunity_id, task_id, description, amount_inr, status, paid_at, created_at)
-                           VALUES (?, ?, ?, ?, 'paid', ?, ?)""",
-                        (
-                            opp_id,
-                            task_id,
-                            f"Reconciled payment for {inv_num} ({inv['client_name']}) - Ref: {bank_ref}",
-                            float(inv["amount_total"]),
-                            now,
-                            now,
-                        ),
-                    )
-
-                # Post to M6 financial_transactions ledger once
-                existing_tx = conn.execute(
-                    "SELECT id FROM financial_transactions WHERE reference_id=? AND tx_type='client_receipt'",
-                    (inv_num,),
-                ).fetchone()
-                if not existing_tx:
-                    subtotal = float(inv["amount_subtotal"])
-                    tax_amt = float(inv["tax_amount"])
+            existing_tx = conn.execute(
+                "SELECT id FROM financial_transactions WHERE reference_id=? AND tx_type='client_receipt'",
+                (inv_num,),
+            ).fetchone()
+            if not existing_tx:
+                subtotal = round(float(inv["amount_subtotal"]), 2)
+                tax_amt = round(float(inv["tax_amount"]), 2)
+                conn.execute(
+                    """INSERT INTO financial_transactions (
+                        tx_date, tx_type, amount_inr, amount_paise, currency,
+                        reference_id, description, is_reversal, created_at
+                    ) VALUES (?, 'client_receipt', ?, ?, 'INR', ?, ?, 0, ?)""",
+                    (
+                        str(st_row["tx_date"])[:10], subtotal, inr_to_paise(subtotal),
+                        inv_num, f"Reconciled client receipt for {inv_num} ({inv['client_name']})", now,
+                    ),
+                )
+                if tax_amt > 0:
                     conn.execute(
                         """INSERT INTO financial_transactions (
                             tx_date, tx_type, amount_inr, amount_paise, currency,
                             reference_id, description, is_reversal, created_at
-                        ) VALUES (?, 'client_receipt', ?, ?, 'INR', ?, ?, 0, ?)""",
+                        ) VALUES (?, 'gst_collected', ?, ?, 'INR', ?, ?, 0, ?)""",
                         (
-                            st_row["tx_date"][:10],
-                            subtotal,
-                            inr_to_paise(subtotal),
-                            inv_num,
-                            f"Reconciled client receipt for {inv_num} ({inv['client_name']})",
-                            now,
+                            str(st_row["tx_date"])[:10], tax_amt, inr_to_paise(tax_amt),
+                            inv_num, f"GST collected on {inv_num}", now,
                         ),
                     )
-                    if tax_amt > 0:
-                        conn.execute(
-                            """INSERT INTO financial_transactions (
-                                tx_date, tx_type, amount_inr, amount_paise, currency,
-                                reference_id, description, is_reversal, created_at
-                            ) VALUES (?, 'gst_collected', ?, ?, 'INR', ?, ?, 0, ?)""",
-                            (
-                                st_row["tx_date"][:10],
-                                tax_amt,
-                                inr_to_paise(tax_amt),
-                                inv_num,
-                                f"GST collected on {inv_num}",
-                                now,
-                            ),
-                        )
 
-        elif entity_type == "expense" and st_row["tx_type"] == "debit":
-            exp_id_clean = str(entity_id).replace("EXP-", "").lstrip("0") or "0"
-            exp = conn.execute(
-                "SELECT * FROM expenses WHERE id = ? OR id = ?",
-                (entity_id, int(exp_id_clean) if exp_id_clean.isdigit() else -1),
+        elif entity_type == "expense" and exp is not None:
+            exp_ref = f"EXP-{int(exp['id']):05d}"
+            existing_tx = conn.execute(
+                "SELECT id FROM financial_transactions WHERE reference_id=? AND tx_type IN ('expense','direct_cost')",
+                (exp_ref,),
             ).fetchone()
-            if exp:
-                existing_tx = conn.execute(
-                    "SELECT id FROM financial_transactions WHERE reference_id = ? AND tx_type IN ('expense', 'direct_cost')",
-                    (f"EXP-{exp['id']:05d}",),
+            if not existing_tx:
+                tx_t = "direct_cost" if exp["category"] == "direct_project_cost" else "expense"
+                conn.execute(
+                    """INSERT INTO financial_transactions (
+                        tx_date, tx_type, amount_inr, amount_paise, currency,
+                        reference_id, description, is_reversal, created_at
+                    ) VALUES (?, ?, ?, ?, 'INR', ?, ?, 0, ?)""",
+                    (
+                        str(st_row["tx_date"])[:10], tx_t, amount, inr_to_paise(amount),
+                        exp_ref, f"Paid expense {exp['vendor']} ({exp['category']})", now,
+                    ),
+                )
+
+        else:
+            ledger_type = {
+                "owner_draw": "owner_draw",
+                "tax_payment": "tax_payment",
+                "gst_payment": "gst_paid",
+            }.get(entity_type)
+            if ledger_type:
+                existing = conn.execute(
+                    "SELECT id FROM financial_transactions WHERE reference_id=? AND tx_type=?",
+                    (ref_for_row, ledger_type),
                 ).fetchone()
-                if not existing_tx:
-                    tx_t = "direct_cost" if exp["category"] == "direct_project_cost" else "expense"
-                    amt = float(st_row["amount_inr"])
-                    now = utc_now()
+                if not existing:
                     conn.execute(
                         """INSERT INTO financial_transactions (
                             tx_date, tx_type, amount_inr, amount_paise, currency,
                             reference_id, description, is_reversal, created_at
                         ) VALUES (?, ?, ?, ?, 'INR', ?, ?, 0, ?)""",
                         (
-                            st_row["tx_date"][:10],
-                            tx_t,
-                            amt,
-                            inr_to_paise(amt),
-                            f"EXP-{exp['id']:05d}",
-                            f"Paid expense {exp['vendor']} ({exp['category']})",
-                            now,
+                            str(st_row["tx_date"])[:10], ledger_type, amount, inr_to_paise(amount),
+                            ref_for_row, f"Reconciled {entity_type}: {st_row['description']}", now,
+                        ),
+                    )
+            else:
+                # "other" cash movements affect bank cash but never business profit.
+                other_type = "other_cash_in" if tx_direction == "credit" else "other_cash_out"
+                existing = conn.execute(
+                    "SELECT id FROM financial_transactions WHERE reference_id=? AND tx_type=?",
+                    (ref_for_row, other_type),
+                ).fetchone()
+                if not existing:
+                    conn.execute(
+                        """INSERT INTO financial_transactions (
+                            tx_date, tx_type, amount_inr, amount_paise, currency,
+                            reference_id, description, is_reversal, created_at
+                        ) VALUES (?, ?, ?, ?, 'INR', ?, ?, 0, ?)""",
+                        (
+                            str(st_row["tx_date"])[:10], other_type, amount, inr_to_paise(amount),
+                            ref_for_row, f"Reconciled other bank movement: {st_row['description']}", now,
                         ),
                     )
 
@@ -662,10 +850,17 @@ def get_cash_and_reserves_summary(
         # MTD performance metrics (scoped to eff_month if not 'all')
         if eff_month and eff_month != "all":
             rec_row = conn.execute(
-                """SELECT COALESCE(SUM(amount_inr), 0) FROM financial_transactions 
-                   WHERE tx_type = 'client_receipt' AND tx_date LIKE ?""",
+                """SELECT COALESCE(SUM(
+                       CASE WHEN tx_type = 'client_receipt' THEN amount_inr
+                            WHEN tx_type = 'refund' THEN -amount_inr
+                            ELSE 0 END
+                   ), 0)
+                   FROM financial_transactions
+                   WHERE tx_type IN ('client_receipt', 'refund') AND tx_date LIKE ?""",
                 (f"{eff_month}%",),
             ).fetchone()
+            # client_receipt and refund are both recorded excluding GST; refunds
+            # therefore reduce realized service receipts, operating profit and taxable profit.
             collected_receipts = float(rec_row[0] if rec_row else 0.0)
 
             exp_summary = get_expenses_summary(month=eff_month)
@@ -673,7 +868,13 @@ def get_cash_and_reserves_summary(
             deductible_operating_expenses = exp_summary["deductible_expenses_inr"]
         else:
             rec_row = conn.execute(
-                "SELECT COALESCE(SUM(amount_inr), 0) FROM financial_transactions WHERE tx_type = 'client_receipt'"
+                """SELECT COALESCE(SUM(
+                       CASE WHEN tx_type = 'client_receipt' THEN amount_inr
+                            WHEN tx_type = 'refund' THEN -amount_inr
+                            ELSE 0 END
+                   ), 0)
+                   FROM financial_transactions
+                   WHERE tx_type IN ('client_receipt', 'refund')"""
             ).fetchone()
             collected_receipts = float(rec_row[0] if rec_row else 0.0)
 
@@ -681,7 +882,7 @@ def get_cash_and_reserves_summary(
             total_operating_expenses = exp_summary["total_expenses_inr"]
             deductible_operating_expenses = exp_summary["deductible_expenses_inr"]
 
-        operating_profit = max(0.0, round(collected_receipts - total_operating_expenses, 2))
+        operating_profit = round(collected_receipts - total_operating_expenses, 2)
         taxable_business_profit = max(0.0, round(collected_receipts - deductible_operating_expenses, 2))
 
         # Lifetime / All ledger transactions for bank cash & reserves
@@ -692,9 +893,12 @@ def get_cash_and_reserves_summary(
         gst_collected = tx_sums.get("gst_collected", 0.0)
         gst_paid = tx_sums.get("gst_paid", 0.0)
         tax_payments = tx_sums.get("tax_payment", 0.0)
-        refunds_paid = tx_sums.get("refund", 0.0)
+        refunds_paid = tx_sums.get("refund", 0.0) + tx_sums.get("gst_refund", 0.0)
+        gst_refunds = tx_sums.get("gst_refund", 0.0)
         owner_draws = tx_sums.get("owner_draw", 0.0)
         platform_fees = tx_sums.get("platform_fee", 0.0)
+        other_cash_in = tx_sums.get("other_cash_in", 0.0)
+        other_cash_out = tx_sums.get("other_cash_out", 0.0)
 
         # Reconciled paid expenses (expenses that have been matched in bank_statement_rows)
         paid_exp_row = conn.execute(
@@ -720,22 +924,27 @@ def get_cash_and_reserves_summary(
 
         # Bank balance calculation
         if bank_balance_known:
-            total_cash_in = all_collected_receipts + gst_collected
-            total_cash_out = paid_expenses + refunds_paid + owner_draws + tax_payments + platform_fees + gst_paid
+            total_cash_in = all_collected_receipts + gst_collected + other_cash_in
+            total_cash_out = paid_expenses + refunds_paid + owner_draws + tax_payments + platform_fees + gst_paid + other_cash_out
             bank_balance = round(opening_balance + total_cash_in - total_cash_out, 2)
         else:
             bank_balance = None
 
         # Statutory GST reserve: GST collected - GST paid (net liability)
-        gst_liability_reserve = max(0.0, round(gst_collected - gst_paid, 2))
+        gst_liability_reserve = max(0.0, round(gst_collected - gst_paid - gst_refunds, 2))
 
         # Income tax reserve calculation
         tax_prof = get_active_tax_profile()
+        tax_settings = validate_tax_profile(tax_prof)
         other_income = float(tax_prof["other_annual_income_inr"]) if tax_prof else 0.0
         advance_tax = float(tax_prof["advance_tax_paid_inr"]) if tax_prof else 0.0
         tds_credits = float(tax_prof["tds_credits_inr"]) if tax_prof else 0.0
 
-        inc_res = compute_business_incremental_tax(taxable_business_profit * 12.0, other_income)
+        inc_res = compute_business_incremental_tax(
+            taxable_business_profit * 12.0,
+            other_income,
+            regime=tax_settings["regime"],
+        )
         annual_tax = inc_res["incremental_business_tax"]
         monthly_tax_provision = round(annual_tax / 12.0, 2)
         income_tax_reserve = max(0.0, round(monthly_tax_provision - (advance_tax + tds_credits) / 12.0, 2))

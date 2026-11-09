@@ -194,6 +194,7 @@ def init_db() -> None:
                 tax_year TEXT NOT NULL DEFAULT '2026-27',
                 regime TEXT NOT NULL DEFAULT 'new_2025',
                 other_annual_income_inr REAL NOT NULL DEFAULT 0.0,
+                other_pan_aggregate_turnover_inr REAL NOT NULL DEFAULT 0.0,
                 advance_tax_paid_inr REAL NOT NULL DEFAULT 0.0,
                 tds_credits_inr REAL NOT NULL DEFAULT 0.0,
                 is_active INTEGER NOT NULL DEFAULT 1,
@@ -262,6 +263,11 @@ def init_db() -> None:
             conn.execute("ALTER TABLE expenses ADD COLUMN reviewed_by TEXT DEFAULT ''")
         if "reviewed_at" not in exp_cols:
             conn.execute("ALTER TABLE expenses ADD COLUMN reviewed_at TEXT")
+        tax_cols = [r["name"] for r in conn.execute("PRAGMA table_info(tax_profiles)").fetchall()]
+        if "other_pan_aggregate_turnover_inr" not in tax_cols:
+            conn.execute(
+                "ALTER TABLE tax_profiles ADD COLUMN other_pan_aggregate_turnover_inr REAL NOT NULL DEFAULT 0.0"
+            )
 
 
 def log_event(event: str, details: str) -> None:
@@ -1042,6 +1048,7 @@ def upsert_tax_profile(
     tax_year: str = "2026-27",
     regime: str = "new_2025",
     other_annual_income_inr: float = 0.0,
+    other_pan_aggregate_turnover_inr: float = 0.0,
     advance_tax_paid_inr: float = 0.0,
     tds_credits_inr: float = 0.0,
 ) -> int:
@@ -1051,9 +1058,10 @@ def upsert_tax_profile(
         cur = conn.execute(
             """INSERT INTO tax_profiles (
                 profile_name, entity_type, residential_status, tax_year, regime,
-                other_annual_income_inr, advance_tax_paid_inr, tds_credits_inr,
+                other_annual_income_inr, other_pan_aggregate_turnover_inr,
+                advance_tax_paid_inr, tds_credits_inr,
                 is_active, created_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1, ?)""",
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?)""",
             (
                 profile_name[:100],
                 entity_type[:50],
@@ -1061,6 +1069,7 @@ def upsert_tax_profile(
                 tax_year[:20],
                 regime[:50],
                 max(0.0, float(other_annual_income_inr)),
+                max(0.0, float(other_pan_aggregate_turnover_inr)),
                 max(0.0, float(advance_tax_paid_inr)),
                 max(0.0, float(tds_credits_inr)),
                 utc_now(),

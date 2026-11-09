@@ -184,9 +184,11 @@ class Milestone6NetProfitTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             reconcile_statement_row(credit_row["id"], "invoice", "INV-MOCK-001", owner_confirmed=False)
 
-        # Confirmed reconciliation succeeds
-        rec_res = reconcile_statement_row(credit_row["id"], "invoice", "INV-MOCK-001", owner_confirmed=True)
-        self.assertEqual(rec_res["status"], "reconciled")
+        # A confirmed checkbox is not enough: the invoice must exist and the
+        # bank credit must exactly match its amount before the row is consumed.
+        with self.assertRaisesRegex(ValueError, "was not found"):
+            reconcile_statement_row(credit_row["id"], "invoice", "INV-MOCK-001", owner_confirmed=True)
+        self.assertEqual(len(list_unreconciled_statement_rows()), 2)
 
     def test_cash_runway_and_distributable_cash_formula(self):
         """Verifies Distributable Cash C = B - G - T - U - W."""

@@ -28,3 +28,6 @@ SOLOEARN is a private, local-first Windows application for one owner. Preserve a
 - Run unit, integration, security, concurrency and packaging tests on a fresh extraction.
 - Record exact Python version, dependency versions, test count, failures and known limitations.
 - Do not label any release 1,000/1,000 or claim ₹1 lakh/month earned unless independently supported by production evidence.
+
+
+Current financial-integrity state (v0.6.1.2): bank reconciliation rejects partial/overpayment matches; unsupported tax profiles fail closed; refunds are split ex-GST/GST; GST threshold estimate includes unpaid issued invoices plus owner-entered other same-PAN turnover; after-tax job-count estimates include incremental tax. Do not claim partial payment support or guaranteed ₹1 lakh/month profit. Next work should prioritize measured service unit economics and first genuine paid-customer validation.

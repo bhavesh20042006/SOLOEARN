@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 """
-SOLOEARN Net Profit Intelligence Engine (M6.1 & M6.2)
+SOLOEARN Net Profit Intelligence Engine (M6.1.2)
 Replaces naive gross-revenue planning with strict, tax-aware post-tax owner profit optimization:
 1. North Star: Minimum ₹1,00,000 / Month AFTER ALL business expenses and income tax (₹12 Lakh / Year).
 2. Internal Buffer Target: ₹1,25,000 / Month.
@@ -22,6 +22,7 @@ from core.tax_engine import (
     compute_income_tax_india_2026,
     compute_required_pretax_profit,
     get_gst_status,
+    validate_tax_profile,
 )
 
 MONTHLY_NET_PROFIT_TARGET_INR = 100000.0  # ₹1 Lakh / Month post-tax
@@ -187,6 +188,7 @@ class NetProfitOptimizer:
         cost_ratio: float,
         deductible_ratio: float = 0.0,
         other_annual_income: float = 0.0,
+        regime: str = "new_2025",
     ) -> float:
         """
         Solves for the monthly collected receipts required to yield `monthly_target`
@@ -200,7 +202,7 @@ class NetProfitOptimizer:
             mid = (low + high) / 2.0
             op_profit = (1.0 - cost_ratio) * mid
             taxable_b_annual = max(0.0, (1.0 - deductible_ratio) * mid * 12.0)
-            inc_res = compute_business_incremental_tax(taxable_b_annual, other_annual_income)
+            inc_res = compute_business_incremental_tax(taxable_b_annual, other_annual_income, regime=regime)
             tax_monthly = inc_res["incremental_business_tax"] / 12.0
             net_posttax = op_profit - tax_monthly
             if abs(net_posttax - monthly_target) < 0.01:
@@ -210,6 +212,55 @@ class NetProfitOptimizer:
             else:
                 high = mid
         return round((low + high) / 2.0, 2)
+
+    @classmethod
+    def _jobs_required_for_after_tax_gap(
+        cls,
+        after_tax_gap_inr: float,
+        contribution_per_job_inr: float,
+        base_taxable_monthly_inr: float,
+        other_annual_income_inr: float,
+        regime: str = "new_2025",
+    ) -> int:
+        """Estimates the minimum whole jobs needed after incremental income tax.
+
+        Service contribution values are currently assumptions. This calculation
+        treats incremental contribution as taxable business profit and applies
+        the configured resident/new-regime tax model to the incremental amount.
+        """
+        if after_tax_gap_inr <= 0:
+            return 0
+        if not math.isfinite(contribution_per_job_inr) or contribution_per_job_inr <= 0:
+            return 0
+
+        base_annual = max(0.0, base_taxable_monthly_inr) * 12.0
+        base_tax = compute_business_incremental_tax(
+            base_annual, other_annual_income_inr, regime=regime
+        )["incremental_business_tax"]
+
+        def net_after_tax(job_count: int) -> float:
+            extra_pre_tax = job_count * contribution_per_job_inr
+            total_tax = compute_business_incremental_tax(
+                base_annual + extra_pre_tax * 12.0,
+                other_annual_income_inr,
+                regime=regime,
+            )["incremental_business_tax"]
+            incremental_tax_monthly = max(0.0, total_tax - base_tax) / 12.0
+            return extra_pre_tax - incremental_tax_monthly
+
+        low, high = 0, max(1, math.ceil(after_tax_gap_inr / contribution_per_job_inr))
+        while net_after_tax(high) < after_tax_gap_inr:
+            high *= 2
+            if high > 1_000_000:
+                raise ValueError("Required job count exceeds supported planning limit")
+
+        while low < high:
+            mid = (low + high) // 2
+            if net_after_tax(mid) >= after_tax_gap_inr:
+                high = mid
+            else:
+                low = mid + 1
+        return low
 
     @classmethod
     def analyze_net_profit(
@@ -228,10 +279,13 @@ class NetProfitOptimizer:
 
         # Active tax profile (other income, regime, etc.)
         tax_prof = get_active_tax_profile()
+        tax_settings = validate_tax_profile(tax_prof)
         other_annual_income = float(tax_prof["other_annual_income_inr"]) if tax_prof else 0.0
 
         annual_target = monthly_target_inr * 12.0
-        annual_pretax_required = compute_required_pretax_profit(annual_target, other_annual_income)
+        annual_pretax_required = compute_required_pretax_profit(
+            annual_target, other_annual_income, regime=tax_settings["regime"]
+        )
         monthly_pretax_required = round(annual_pretax_required / 12.0, 2)
 
         # Retrieve cash, receipts, expenses, and reserves
@@ -247,9 +301,9 @@ class NetProfitOptimizer:
         mtd_income_tax = round(inc_tax_res["incremental_business_tax"] / 12.0, 2)
 
         # Net Profit After Tax
-        mtd_net_profit = max(0.0, round(operating_profit - mtd_income_tax, 2))
+        mtd_net_profit = round(operating_profit - mtd_income_tax, 2)
         gap = max(0.0, round(monthly_target_inr - mtd_net_profit, 2))
-        progress = min(100.0, round((mtd_net_profit / monthly_target_inr) * 100.0, 1))
+        progress = min(100.0, max(0.0, round((mtd_net_profit / monthly_target_inr) * 100.0, 1)))
 
         # Observed operating expense ratio & deductible ratio:
         if collected_receipts > 0:
@@ -265,23 +319,46 @@ class NetProfitOptimizer:
             cost_ratio=cost_ratio,
             deductible_ratio=deductible_ratio,
             other_annual_income=other_annual_income,
+            regime=tax_settings["regime"],
         )
 
-        # GST Status
+        # GST aggregate turnover is based on supplies, not merely invoices already paid.
+        # Include all non-cancelled SOLOEARN invoices issued within the configured tax year
+        # plus owner-entered turnover from other activities under the same PAN.
+        tax_year = str(tax_prof.get("tax_year", "2026-27")) if tax_prof else "2026-27"
+        fy_start_year = int(tax_year[:4])
+        fy_start = f"{fy_start_year:04d}-04-01"
+        fy_end = f"{fy_start_year + 1:04d}-04-01"
         with connect() as conn:
             row_inv = conn.execute(
-                "SELECT COALESCE(SUM(amount_subtotal), 0) FROM invoices WHERE status = 'paid'"
+                """SELECT COALESCE(SUM(amount_subtotal), 0)
+                   FROM invoices
+                   WHERE status <> 'cancelled'
+                     AND substr(issued_at, 1, 10) >= ?
+                     AND substr(issued_at, 1, 10) < ?""",
+                (fy_start, fy_end),
             ).fetchone()
-            total_turnover = float(row_inv[0] if row_inv else 0.0)
-
+            invoice_turnover = float(row_inv[0] if row_inv else 0.0)
+        other_pan_turnover = float(tax_prof.get("other_pan_aggregate_turnover_inr", 0.0)) if tax_prof else 0.0
+        total_turnover = invoice_turnover + other_pan_turnover
         gst_info = get_gst_status(total_turnover)
+        gst_info["soloearn_invoice_turnover_inr"] = round(invoice_turnover, 2)
+        gst_info["other_same_pan_turnover_inr"] = round(other_pan_turnover, 2)
+        gst_info["turnover_basis"] = "FY non-cancelled invoice subtotals plus owner-entered other aggregate turnover under the same PAN; CA review required"
 
-        # Capacity needed to close remaining gap:
-        avg_contrib = 10000.0
-        jobs_needed_total = math.ceil(gap / avg_contrib) if gap > 0 else 0
+        # Estimate whole-job counts after incremental income tax, not by comparing
+        # pre-tax service contribution directly with the post-tax profit gap.
+        average_contribution = sum(s.net_contribution_inr for s in SERVICE_PROFIT_SPECS) / len(SERVICE_PROFIT_SPECS)
+        jobs_needed_total = cls._jobs_required_for_after_tax_gap(
+            gap, average_contribution, taxable_business_profit,
+            other_annual_income, regime=tax_settings["regime"],
+        ) if gap > 0 else 0
 
         needed_by_tier = {
-            s.tier_id: math.ceil(gap / s.net_contribution_inr) if gap > 0 else 0
+            s.tier_id: cls._jobs_required_for_after_tax_gap(
+                gap, s.net_contribution_inr, taxable_business_profit,
+                other_annual_income, regime=tax_settings["regime"],
+            ) if gap > 0 else 0
             for s in SERVICE_PROFIT_SPECS
         }
 
@@ -306,7 +383,9 @@ class NetProfitOptimizer:
                 f"₹{monthly_target_inr:,.2f} in take-home profit. "
                 f"This requires delivering approximately {needed_by_tier.get('data_analytics', 0)} Excel packs or "
                 f"{needed_by_tier.get('data_engineering', 0)} ETL pipelines. "
-                f"Distributable cash: {distrib_str}."
+                f"Distributable cash: {distrib_str}. "
+                "Job counts are planning estimates based on assumed service contribution and estimated incremental tax; "
+                "they do not yet allocate unmeasured shared overhead, customer-acquisition cost, or rework."
             )
 
         return NetProfitPlan(
