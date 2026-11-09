@@ -10,6 +10,14 @@ import streamlit as st
 
 from core.analytics import create_analytics_bundle
 from core.autonomous_worker import run_autonomous_job
+from core.commercial_funnel import (
+    add_commercial_lead,
+    calculate_project_unit_economics,
+    get_funnel_metrics,
+    init_commercial_tables,
+    list_commercial_leads,
+    update_lead_stage,
+)
 from core.config import (
     MAX_UPLOAD_MB,
     OLLAMA_MODEL,
@@ -128,6 +136,7 @@ cols[3].metric("Completed tasks", m["completed_tasks"])
 
 tabs = st.tabs([
     "Overview",
+    "Commercial Hub & Acquisition (M6.2)",
     "Autonomous Discovery (M4)",
     "Opportunity Pipeline",
     "Revenue Operations & Invoicing (M5)",
@@ -170,8 +179,184 @@ with tabs[0]:
         st.info("No tasks yet. Try the CSV Workbench or Autonomous Discovery.")
 
 
-# ----------------- Tab 1: Autonomous Discovery (Milestone 4) -----------------
+# ----------------- Tab 1: Commercial Hub & Client Acquisition (M6.2) -----------------
 with tabs[1]:
+    st.subheader("🎯 Commercial Hub & Client Acquisition (Milestone 6.2)")
+    st.caption("Operational playbook for acquiring the first three paying pilot customers (50/30/5/3 Campaign) and evaluating real post-tax project unit economics.")
+
+    # Section 1: 50/30/5/3 Campaign Progress Metrics
+    f_metrics = get_funnel_metrics()
+    c1, c2, c3, c4 = st.columns(4)
+    with c1:
+        st.metric(
+            "1. Identified Prospects",
+            f"{f_metrics['identified_count']} / {f_metrics['identified_target']}",
+            f"{f_metrics['identified_progress_pct']}% of goal",
+        )
+        st.progress(min(1.0, f_metrics['identified_progress_pct'] / 100.0))
+    with c2:
+        st.metric(
+            "2. Personalized Approaches",
+            f"{f_metrics['approached_count']} / {f_metrics['approached_target']}",
+            f"{f_metrics['approached_progress_pct']}% of goal",
+        )
+        st.progress(min(1.0, f_metrics['approached_progress_pct'] / 100.0))
+    with c3:
+        st.metric(
+            "3. In Conversation",
+            f"{f_metrics['in_conversation_count']} / {f_metrics['in_conversation_target']}",
+            f"{f_metrics['in_conversation_progress_pct']}% of goal",
+        )
+        st.progress(min(1.0, f_metrics['in_conversation_progress_pct'] / 100.0))
+    with c4:
+        st.metric(
+            "4. Paid Pilot Clients",
+            f"{f_metrics['paid_pilot_count']} / {f_metrics['paid_pilot_target']}",
+            f"{f_metrics['paid_pilot_progress_pct']}% of goal",
+        )
+        st.progress(min(1.0, f_metrics['paid_pilot_progress_pct'] / 100.0))
+
+    st.divider()
+
+    # Section 2: Unit Economics & Quote Calculator
+    st.markdown("### 🧮 Project Unit Economics & Profit Yield Calculator")
+    st.caption("Calculates exact owner take-home profit after payment gateway fees, compute costs, and statutory Indian income tax.")
+
+    ue_col1, ue_col2 = st.columns([1, 1])
+    with ue_col1:
+        calc_service = st.selectbox(
+            "Select Service Offering",
+            options=[
+                ("Tier 1: Business Analytics & Excel Pack (Pilot)", 5000.0, 5.0, 150.0, 2.0),
+                ("Tier 2: CSV Reconciliation Automation", 10000.0, 5.0, 250.0, 3.0),
+                ("Tier 3: Data Engineering ETL Pipeline", 15000.0, 5.0, 500.0, 5.0),
+                ("Tier 4: Executive Interactive Dashboard", 20000.0, 5.0, 600.0, 6.0),
+            ],
+            format_func=lambda x: f"{x[0]} (₹{x[1]:,.0f})",
+        )
+        quote_price = st.number_input("Gross Quote to Client (₹)", min_value=100.0, value=float(calc_service[1]), step=500.0)
+        est_hours = st.number_input("Estimated Delivery Effort (Hours)", min_value=0.5, value=float(calc_service[4]), step=0.5)
+        platform_fee = st.number_input("Payment Gateway / Platform Fee (%)", min_value=0.0, max_value=30.0, value=float(calc_service[2]), step=0.5)
+        direct_cost = st.number_input("Direct Workspace / Compute Costs (₹)", min_value=0.0, value=float(calc_service[3]), step=50.0)
+
+    with ue_col2:
+        try:
+            econ = calculate_project_unit_economics(
+                gross_price_inr=quote_price,
+                platform_fee_pct=platform_fee,
+                direct_cost_inr=direct_cost,
+                estimated_hours=est_hours,
+            )
+            st.markdown("#### Profit & Return Breakdown")
+            kpi_c1, kpi_c2 = st.columns(2)
+            kpi_c1.metric("Net Pre-Tax Margin", f"{econ['contribution_margin_pct']}%", f"₹{econ['net_pretax_receipt_inr']:,.0f}")
+            kpi_c2.metric("Net Owner Profit", f"₹{econ['net_owner_profit_inr']:,.0f}")
+
+            kpi_c3, kpi_c4 = st.columns(2)
+            kpi_c3.metric("Tax Reserve", f"₹{econ['estimated_tax_reserve_inr']:,.0f}", f"Rate: {econ['effective_tax_rate_pct']}%")
+            kpi_c4.metric("Hourly Yield", f"₹{econ['hourly_yield_inr']:,.0f} / hr", f"over {econ['estimated_hours']} hrs")
+
+            if econ['net_owner_profit_inr'] <= 0:
+                st.error("⚠️ This quote results in negative net owner profit after costs and taxes. Increase client price.")
+            elif econ['contribution_margin_pct'] < 70.0:
+                st.warning("⚠️ Contribution margin is below recommended 70% threshold.")
+            else:
+                st.success("✅ Profitable quote meeting SOLOEARN unit economic thresholds.")
+        except Exception as e:
+            st.error(f"Error calculating unit economics: {e}")
+
+    st.divider()
+
+    # Section 3: Prospect Management (50/30/5/3 Pipeline)
+    st.markdown("### 📋 Prospect & Client Pipeline Management")
+    lead_col1, lead_col2 = st.columns([1, 1])
+
+    with lead_col1:
+        st.markdown("#### ➕ Add Qualified Prospect")
+        with st.form("add_commercial_lead_form"):
+            c_name = st.text_input("Company / Brand Name", placeholder="e.g. Apex D2C Apparel")
+            c_contact = st.text_input("Contact Person & Role", placeholder="e.g. Rohan Mehra (Founder / Head of Growth)")
+            c_channel = st.selectbox("Outreach Channel", options=["linkedin", "email", "phone_whatsapp", "direct_network", "freelance_platform", "other"], format_func=lambda x: x.replace("_", " ").title())
+            c_handle = st.text_input("Handle / Email / Profile URL", placeholder="e.g. linkedin.com/in/rohanmehra")
+            c_ind = st.selectbox("Industry", options=["ecommerce", "retail", "wholesale", "accounting", "services", "other"], format_func=lambda x: x.title())
+            c_tier = st.selectbox("Target Service Package", options=["data_analytics", "csv_reconciliation", "data_engineering", "interactive_dashboard"], format_func=lambda x: x.replace("_", " ").title())
+            c_price = st.number_input("Proposed Pilot Price (₹)", min_value=500.0, value=5000.0, step=500.0)
+            c_stage = st.selectbox("Initial Funnel Stage", options=["identified", "approached", "in_conversation", "paid_pilot"])
+            c_notes = st.text_area("Initial Assessment Notes", placeholder="e.g. Active Shopify store; estimated 100 orders/day; handles reporting manually.")
+
+            lead_submitted = st.form_submit_button("Add Prospect to Pipeline", use_container_width=True)
+            if lead_submitted:
+                if not c_name or not c_contact:
+                    st.error("Company Name and Contact Person are required.")
+                else:
+                    new_id = add_commercial_lead(
+                        company_name=c_name,
+                        contact_name=c_contact,
+                        contact_channel=c_channel,
+                        contact_handle=c_handle,
+                        industry=c_ind,
+                        service_tier=c_tier,
+                        proposed_price_inr=c_price,
+                        stage=c_stage,
+                        notes=c_notes,
+                    )
+                    st.success(f"Added prospect #{new_id}: {c_name} to '{c_stage}' stage.")
+                    st.rerun()
+
+    with lead_col2:
+        st.markdown("#### 🔄 Transition Lead Stage")
+        leads_list = list_commercial_leads()
+        if leads_list:
+            lead_options = {l["id"]: f"#{l['id']} - {l['company_name']} ({l['contact_name']}) [{l['stage'].title()}]" for l in leads_list}
+            selected_lead_id = st.selectbox("Select Prospect", options=list(lead_options.keys()), format_func=lambda x: lead_options[x])
+            sel_lead = next(l for l in leads_list if l["id"] == selected_lead_id)
+
+            with st.form("update_lead_stage_form"):
+                target_stage = st.selectbox("Update Stage To", options=["identified", "approached", "in_conversation", "paid_pilot", "delivered", "lost"], index=["identified", "approached", "in_conversation", "paid_pilot", "delivered", "lost"].index(sel_lead["stage"]))
+                stage_notes = st.text_area("Update Notes / Conversation Log", value=sel_lead.get("notes", "") or "")
+                update_submitted = st.form_submit_button("Update Funnel Stage", use_container_width=True)
+                if update_submitted:
+                    update_lead_stage(selected_lead_id, target_stage, notes=stage_notes)
+                    st.success(f"Prospect #{selected_lead_id} updated to '{target_stage}'.")
+                    st.rerun()
+        else:
+            st.info("No prospects registered yet. Use the form on the left to add your first qualified prospect.")
+
+    st.markdown("#### 📊 Active Commercial Pipeline")
+    if leads_list:
+        df_leads = pd.DataFrame(leads_list)[["id", "company_name", "contact_name", "contact_channel", "industry", "proposed_price_inr", "stage", "updated_at"]]
+        st.dataframe(df_leads, use_container_width=True, hide_index=True)
+    else:
+        st.caption("No leads in pipeline.")
+
+    st.divider()
+
+    # Section 4: Verified Pilot Deliverables Showcase
+    st.markdown("### 📦 Verified Sample Deliverables Showcase (Task #0469)")
+    st.caption("Demonstrates the verified 5-asset client deliverable package produced by SOLOEARN from e-commerce sales data in 2.14 seconds.")
+
+    deliv_ws = Path(PROJECT_ROOT) / "workspaces" / "task_0469"
+    if deliv_ws.exists():
+        show_c1, show_c2, show_c3 = st.columns(3)
+        show_c1.markdown("**1. Cleaned CSV & Excel**\n- `cleaned_data.csv` (12 rows, formula-sanitized)\n- `business_analysis.xlsx` (3 sheets, auto-filters)")
+        show_c2.markdown("**2. Visual Charts Suite**\n- 6 distribution charts in `charts/`\n- Metro sales, price distributions, order pacing")
+        show_c3.markdown("**3. Executive Report**\n- `report.html` (Standalone, zero-cloud)\n- `deliverables.zip` (104 KB verified package)")
+
+        zip_file = deliv_ws / "deliverables.zip"
+        if zip_file.exists():
+            st.download_button(
+                "⬇️ Download Sample Client Deliverables (deliverables.zip)",
+                data=zip_file.read_bytes(),
+                file_name="SOLOEARN_Pilot_Deliverables_Sample.zip",
+                mime="application/zip",
+                use_container_width=True,
+            )
+    else:
+        st.info("Run `python scripts/run_sample_job_verification.py` to regenerate the verified sample deliverable package.")
+
+
+# ----------------- Tab 2: Autonomous Discovery (Milestone 4) -----------------
+with tabs[2]:
     st.subheader("📡 Autonomous Opportunity Discovery (Milestone 4)")
     st.caption("Proactively discovers, screens, and ranks freelance leads from authorized RSS/Atom feeds, JSON APIs, and local dropzones.")
 
@@ -327,8 +512,8 @@ with tabs[1]:
         st.info("No opportunities in pipeline. Trigger discovery above or import opportunities.")
 
 
-# ----------------- Tab 2: Opportunity Pipeline -----------------
-with tabs[2]:
+# ----------------- Tab 3: Opportunity Pipeline -----------------
+with tabs[3]:
     st.subheader("Opportunity Pipeline & Management")
 
     entry_tab1, entry_tab2 = st.tabs(["Add single opportunity", "Import from CSV"])
@@ -505,8 +690,8 @@ with tabs[2]:
         st.info("No opportunities have been added yet.")
 
 
-# ----------------- Tab 3: Revenue Operations & Invoicing (M5) -----------------
-with tabs[3]:
+# ----------------- Tab 4: Revenue Operations & Invoicing (M5) -----------------
+with tabs[4]:
     st.subheader("🧾 Client Invoicing & Owner-Confirmed Receipts (Milestone 5)")
     st.caption("Generate local invoice drafts and record owner-confirmed receipts. SOLOEARN does not connect to a bank or independently verify UTRs.")
 
@@ -653,8 +838,8 @@ with tabs[3]:
             st.rerun()
 
 
-# ----------------- Tab 4: Net Profit Control Centre (M6) -----------------
-with tabs[4]:
+# ----------------- Tab 5: Net Profit Control Centre (M6) -----------------
+with tabs[5]:
     st.subheader("💎 Net Profit Intelligence Control Centre (Milestone 6)")
     st.caption("Engineered strictly around ₹1,00,000 / Month AFTER ALL business expenses and Indian income tax (Income-tax Act, 2025). Planning model only; consult a CA for official filing.")
 
@@ -961,8 +1146,8 @@ with tabs[4]:
         st.info("No opportunities in pipeline to rank.")
 
 
-# ----------------- Tab 5: CSV Workbench -----------------
-with tabs[5]:
+# ----------------- Tab 6: CSV Workbench -----------------
+with tabs[6]:
     st.subheader("CSV → business deliverables")
     st.write("Upload a CSV you own or are authorized to process. The worker creates a cleaned CSV, an Excel workbook, data-quality profile, charts and an HTML report.")
     uploaded = st.file_uploader("Choose a CSV file", type=["csv"], help=f"Maximum {MAX_UPLOAD_MB} MB and 250,000 rows in this MVP.")
@@ -1017,8 +1202,8 @@ with tabs[5]:
         st.dataframe(pd.DataFrame(tasks)[["id", "title", "status", "artifact_path", "created_at"]], use_container_width=True, hide_index=True)
 
 
-# ----------------- Tab 6: Earnings & Audit -----------------
-with tabs[6]:
+# ----------------- Tab 7: Earnings & Audit -----------------
+with tabs[7]:
     st.subheader("Record income")
     st.caption("This form records expected or invoiced values only. Record paid receipts through the invoice workflow after independently checking your bank statement and payment reference.")
     with st.form("revenue_form", clear_on_submit=True):
