@@ -15,9 +15,10 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any
 
-from core.db import connect
+from core.db import connect, get_active_tax_profile
 from core.financial_ledger import get_cash_and_reserves_summary, get_expenses_summary
 from core.tax_engine import (
+    compute_business_incremental_tax,
     compute_income_tax_india_2026,
     compute_required_pretax_profit,
     get_gst_status,
@@ -112,10 +113,11 @@ class NetProfitPlan:
     mtd_net_profit_after_tax_inr: float
     net_profit_gap_inr: float
     progress_pct: float
-    distributable_cash_inr: float
+    distributable_cash_inr: float | None
     gst_status: dict[str, Any]
     service_capacities_needed: dict[str, int]
     recommended_action: str
+    bank_balance_known: bool = False
     service_economics: list[dict[str, Any]] = field(default_factory=list)
 
 
@@ -179,50 +181,93 @@ class NetProfitOptimizer:
         }
 
     @classmethod
+    def solve_required_receipts(
+        cls,
+        monthly_target: float,
+        cost_ratio: float,
+        deductible_ratio: float = 0.0,
+        other_annual_income: float = 0.0,
+    ) -> float:
+        """
+        Solves for the monthly collected receipts required to yield `monthly_target`
+        after operating expenses and incremental business income tax.
+        """
+        if monthly_target <= 0:
+            return 0.0
+        low = 0.0
+        high = max(50000000.0, (monthly_target * 12.0 + other_annual_income) * 4.0 / 12.0)
+        for _ in range(60):
+            mid = (low + high) / 2.0
+            op_profit = (1.0 - cost_ratio) * mid
+            taxable_b_annual = max(0.0, (1.0 - deductible_ratio) * mid * 12.0)
+            inc_res = compute_business_incremental_tax(taxable_b_annual, other_annual_income)
+            tax_monthly = inc_res["incremental_business_tax"] / 12.0
+            net_posttax = op_profit - tax_monthly
+            if abs(net_posttax - monthly_target) < 0.01:
+                return round(mid, 2)
+            if net_posttax < monthly_target:
+                low = mid
+            else:
+                high = mid
+        return round((low + high) / 2.0, 2)
+
+    @classmethod
     def analyze_net_profit(
         cls,
         monthly_target_inr: float = MONTHLY_NET_PROFIT_TARGET_INR,
     ) -> NetProfitPlan:
         """
         Performs full net profit analysis for the current month:
-        1. Computes pre-tax profit required for target post-tax profit.
+        1. Computes pre-tax profit required for target post-tax profit accounting for other income.
         2. Gathers actual collected receipts and actual business expenses.
         3. Computes operating profit, models income tax, and determines post-tax profit.
-        4. Calculates required receipts using observed expense ratio.
+        4. Calculates required receipts using observed expense ratio and tax deductibility ratio.
         """
         if not math.isfinite(monthly_target_inr) or monthly_target_inr <= 0:
             raise ValueError("Monthly net profit target must be a positive finite number")
 
+        # Active tax profile (other income, regime, etc.)
+        tax_prof = get_active_tax_profile()
+        other_annual_income = float(tax_prof["other_annual_income_inr"]) if tax_prof else 0.0
+
         annual_target = monthly_target_inr * 12.0
-        annual_pretax_required = compute_required_pretax_profit(annual_target)
+        annual_pretax_required = compute_required_pretax_profit(annual_target, other_annual_income)
         monthly_pretax_required = round(annual_pretax_required / 12.0, 2)
 
         # Retrieve cash, receipts, expenses, and reserves
         cash_res = get_cash_and_reserves_summary()
         collected_receipts = cash_res["collected_receipts_inr"]
         operating_expenses = cash_res["total_operating_expenses_inr"]
-        operating_profit = max(0.0, round(collected_receipts - operating_expenses, 2))
+        deductible_expenses = cash_res.get("deductible_operating_expenses_inr", 0.0)
+        operating_profit = cash_res["operating_profit_inr"]
+        taxable_business_profit = cash_res.get("taxable_business_profit_inr", operating_profit)
 
         # Annualized tax estimate for current run-rate
-        tax_res = compute_income_tax_india_2026(operating_profit * 12.0)
-        mtd_income_tax = round(tax_res["total_tax"] / 12.0, 2)
+        inc_tax_res = compute_business_incremental_tax(taxable_business_profit * 12.0, other_annual_income)
+        mtd_income_tax = round(inc_tax_res["incremental_business_tax"] / 12.0, 2)
 
         # Net Profit After Tax
         mtd_net_profit = max(0.0, round(operating_profit - mtd_income_tax, 2))
         gap = max(0.0, round(monthly_target_inr - mtd_net_profit, 2))
         progress = min(100.0, round((mtd_net_profit / monthly_target_inr) * 100.0, 1))
 
-        # Observed operating expense ratio:
+        # Observed operating expense ratio & deductible ratio:
         if collected_receipts > 0:
-            observed_ratio = min(0.80, max(0.05, operating_expenses / collected_receipts))
+            cost_ratio = min(0.80, max(0.0, operating_expenses / collected_receipts))
+            deductible_ratio = min(cost_ratio, max(0.0, deductible_expenses / collected_receipts))
         else:
-            observed_ratio = 0.20  # Default 20% planning assumption
+            cost_ratio = 0.25      # Default 25% planning assumption
+            deductible_ratio = 0.0  # 0% tax deductions until reviewed
 
-        # Monthly Receipts Required = Pretax Required / (1 - expense_ratio)
-        monthly_receipts_required = round(monthly_pretax_required / (1.0 - observed_ratio), 2)
+        # Monthly Receipts Required solved via binary search
+        monthly_receipts_required = cls.solve_required_receipts(
+            monthly_target=monthly_target_inr,
+            cost_ratio=cost_ratio,
+            deductible_ratio=deductible_ratio,
+            other_annual_income=other_annual_income,
+        )
 
         # GST Status
-        # Annualized turnover estimate:
         with connect() as conn:
             row_inv = conn.execute(
                 "SELECT COALESCE(SUM(amount_subtotal), 0) FROM invoices WHERE status = 'paid'"
@@ -232,7 +277,6 @@ class NetProfitOptimizer:
         gst_info = get_gst_status(total_turnover)
 
         # Capacity needed to close remaining gap:
-        # Use average net contribution across service catalog (~₹10,000 per project)
         avg_contrib = 10000.0
         jobs_needed_total = math.ceil(gap / avg_contrib) if gap > 0 else 0
 
@@ -242,20 +286,27 @@ class NetProfitOptimizer:
         }
 
         # Recommendations
+        distrib_str = (
+            f"₹{cash_res['distributable_cash_inr']:,.2f}"
+            if cash_res.get("distributable_cash_inr") is not None
+            else "unknown (opening balance unconfirmed)"
+        )
+
         if gap <= 0:
             rec = (
                 f"Net profit target achieved: ₹{mtd_net_profit:,.2f} confirmed post-tax profit this month "
                 f"(after ₹{operating_expenses:,.2f} in expenses and ₹{mtd_income_tax:,.2f} in estimated tax). "
-                f"Distributable cash available: ₹{cash_res['distributable_cash_inr']:,.2f}."
+                f"Distributable cash available: {distrib_str}."
             )
         else:
             rec = (
                 f"Current post-tax net profit gap is ₹{gap:,.2f} this month. "
-                f"At your observed {observed_ratio * 100:.1f}% cost ratio, you require approximately "
+                f"At your observed {cost_ratio * 100:.1f}% cost ratio, you require approximately "
                 f"₹{monthly_receipts_required:,.2f} in gross collected receipts (ex-GST) to produce "
                 f"₹{monthly_target_inr:,.2f} in take-home profit. "
                 f"This requires delivering approximately {needed_by_tier.get('data_analytics', 0)} Excel packs or "
-                f"{needed_by_tier.get('data_engineering', 0)} ETL pipelines."
+                f"{needed_by_tier.get('data_engineering', 0)} ETL pipelines. "
+                f"Distributable cash: {distrib_str}."
             )
 
         return NetProfitPlan(
@@ -263,7 +314,7 @@ class NetProfitOptimizer:
             annual_net_profit_target_inr=annual_target,
             annual_pretax_profit_required_inr=annual_pretax_required,
             monthly_pretax_profit_required_inr=monthly_pretax_required,
-            observed_expense_ratio_pct=round(observed_ratio * 100.0, 1),
+            observed_expense_ratio_pct=round(cost_ratio * 100.0, 1),
             monthly_receipts_required_ex_gst_inr=monthly_receipts_required,
             mtd_collected_receipts_inr=collected_receipts,
             mtd_operating_expenses_inr=operating_expenses,
@@ -273,6 +324,7 @@ class NetProfitOptimizer:
             net_profit_gap_inr=gap,
             progress_pct=progress,
             distributable_cash_inr=cash_res["distributable_cash_inr"],
+            bank_balance_known=cash_res.get("bank_balance_known", False),
             gst_status=gst_info,
             service_capacities_needed={
                 "total_jobs_needed": jobs_needed_total,

@@ -46,6 +46,10 @@ from core.db import (
     save_proposal_draft,
     update_opportunity_status,
     verify_invoice_payment,
+    get_active_tax_profile,
+    get_bank_opening_balance,
+    set_bank_opening_balance,
+    upsert_tax_profile,
 )
 from core.discovery_engine import DiscoveryEngine
 from core.invoice_generator import render_invoice_html
@@ -651,16 +655,20 @@ with tabs[3]:
 # ----------------- Tab 4: Net Profit Control Centre (M6) -----------------
 with tabs[4]:
     st.subheader("💎 Net Profit Intelligence Control Centre (Milestone 6)")
-    st.caption("Engineered strictly around ₹1,00,000 / Month AFTER ALL business expenses and Indian income tax (Income-tax Act, 2025).")
+    st.caption("Engineered strictly around ₹1,00,000 / Month AFTER ALL business expenses and Indian income tax (Income-tax Act, 2025). Planning model only; consult a CA for official filing.")
 
     np_plan = NetProfitOptimizer.analyze_net_profit(MONTHLY_NET_PROFIT_TARGET_INR)
 
     st.markdown("### 🏆 Post-Tax Owner Profit North Star")
     kpi1, kpi2, kpi3, kpi4 = st.columns(4)
     kpi1.metric("Take-Home Profit Target", f"₹{np_plan.monthly_net_profit_target_inr:,.0f}/mo", "₹12 Lakh / Yr")
-    kpi2.metric("Confirmed Net Profit MTD", f"₹{np_plan.mtd_net_profit_after_tax_inr:,.0f}", f"{np_plan.progress_pct}%")
+    kpi2.metric("Estimated Net Profit MTD", f"₹{np_plan.mtd_net_profit_after_tax_inr:,.0f}", f"{np_plan.progress_pct}%")
     kpi3.metric("Operating Expenses MTD", f"₹{np_plan.mtd_operating_expenses_inr:,.0f}", f"{np_plan.observed_expense_ratio_pct}% cost ratio")
-    kpi4.metric("Distributable Cash In Bank", f"₹{np_plan.distributable_cash_inr:,.0f}", "After tax/GST reserves")
+    
+    if np_plan.distributable_cash_inr is not None:
+        kpi4.metric("Distributable Cash In Bank", f"₹{np_plan.distributable_cash_inr:,.0f}", "After tax/GST reserves")
+    else:
+        kpi4.metric("Distributable Cash In Bank", "Unknown", "Opening balance unconfirmed")
 
     st.progress(
         min(1.0, np_plan.progress_pct / 100.0),
@@ -674,7 +682,12 @@ with tabs[4]:
     st.markdown("### ⚖️ Tax, GST & Cash Runway Reserves (C = B - G - T - U - W)")
     cash_info = get_cash_and_reserves_summary()
     rc1, rc2, rc3, rc4 = st.columns(4)
-    rc1.metric("Bank Cash Balance (B)", f"₹{cash_info['bank_balance_inr']:,.2f}")
+    
+    if cash_info["bank_balance_inr"] is not None:
+        rc1.metric("Bank Cash Balance (B)", f"₹{cash_info['bank_balance_inr']:,.2f}")
+    else:
+        rc1.metric("Bank Cash Balance (B)", "Unknown", "Awaiting confirmed opening balance")
+        
     rc2.metric("GST Liability Reserve (G)", f"₹{cash_info['gst_liability_reserve_inr']:,.2f}")
     rc3.metric("Income Tax Reserve (T)", f"₹{cash_info['income_tax_reserve_inr']:,.2f}", f"Est. Tax MTD: ₹{np_plan.mtd_estimated_income_tax_inr:,.0f}")
     rc4.metric("Working Capital Buffer (W)", f"₹{cash_info['working_capital_buffer_inr']:,.2f}")
@@ -690,7 +703,7 @@ with tabs[4]:
     # Section 2: Required Customer Receipts Model
     st.divider()
     st.markdown("### 📈 Required Customer Receipts ex-GST to Net ₹1,00,000 / Month")
-    st.caption("Under Income-tax Act, 2025 Section 202 & Section 156, ₹12.74 Lakh annual pre-tax profit yields ₹12.00 Lakh post-tax profit (₹1 Lakh/mo).")
+    st.caption("Under Income-tax Act, 2025 Section 202 & Section 156, ₹12.74 Lakh annual pre-tax profit yields ₹12.00 Lakh post-tax profit (₹1 Lakh/mo). Scenario table explicitly assumes all operating costs qualify as tax-deductible.")
 
     cost_ratios = [10, 20, 25, 30, 35, 40, 50]
     annual_pretax = np_plan.annual_pretax_profit_required_inr
@@ -722,8 +735,10 @@ with tabs[4]:
                 format_func=lambda x: x.replace("_", " ").title(),
             )
             exp_amount = st.number_input("Expense Amount (₹)", min_value=1.0, value=500.0, step=50.0)
-            gst_paid_input = st.number_input("GST Paid (Input Tax Credit) ₹", min_value=0.0, value=0.0, step=10.0)
-            deduct = st.selectbox("Tax Deductibility", options=["deductible", "unknown", "partly_deductible", "non_deductible"])
+            vendor_gst_input = st.number_input("Vendor GST on Invoice (Informational only) ₹", min_value=0.0, value=0.0, step=10.0, help="Stored for records; no automatic ITC is claimed.")
+            deduct = st.selectbox("Tax Deductibility", options=["unknown", "deductible", "partly_deductible", "non_deductible"])
+            ca_review_box = st.checkbox("CA Review Confirmed (Required if claiming deductible/partly deductible)")
+            ca_notes_input = st.text_input("CA Review Notes / Reference", placeholder="e.g. Reviewed with CA Sharma on 2026-11-01")
             business_pct = st.slider("Business Use %", min_value=0.0, max_value=100.0, value=100.0, step=5.0)
             exp_notes = st.text_input("Reviewer Notes", placeholder="Receipt hash / reference / invoice number")
 
@@ -735,14 +750,61 @@ with tabs[4]:
                         category=cat,
                         amount_inr=exp_amount,
                         business_use_pct=business_pct,
-                        gst_amount_inr=gst_paid_input,
+                        gst_amount_inr=vendor_gst_input,
                         tax_deductibility=deduct,
                         reviewer_notes=exp_notes,
+                        ca_review_confirmed=ca_review_box,
+                        ca_review_notes=ca_notes_input,
+                        reviewed_by="Owner with CA" if ca_review_box else "",
                     )
                     st.success(f"Expense EXP-{eid:05d} recorded and ledger updated!")
                     st.rerun()
                 except Exception as exc:
                     st.error(f"Error registering expense: {exc}")
+
+        with st.expander("⚙️ Set / Confirm Bank Statement Opening Balance"):
+            with st.form("bank_balance_form"):
+                b_amount = st.number_input("Confirmed Bank Balance (₹)", min_value=0.0, value=50000.0, step=1000.0)
+                b_date = st.date_input("As-of Statement Date")
+                b_confirm = st.checkbox("I attest that this matches my official bank statement closing balance")
+                if st.form_submit_button("Save Confirmed Bank Balance"):
+                    if b_confirm:
+                        set_bank_opening_balance(b_amount, as_of_date=str(b_date), is_confirmed=True)
+                        st.success("Bank opening balance confirmed!")
+                        st.rerun()
+                    else:
+                        st.error("Owner confirmation is required.")
+
+        with st.expander("👤 Personal Tax Profile (Income-tax Act, 2025)"):
+            active_prof = get_active_tax_profile()
+            with st.form("tax_profile_form"):
+                other_inc = st.number_input(
+                    "Other Annual Taxable Income (₹)",
+                    min_value=0.0,
+                    value=float(active_prof["other_annual_income_inr"]) if active_prof else 0.0,
+                    step=10000.0,
+                    help="Includes salary, interest, capital gains, or rental income to compute incremental business tax bracket."
+                )
+                adv_tax = st.number_input(
+                    "Advance Tax Paid YTD (₹)",
+                    min_value=0.0,
+                    value=float(active_prof["advance_tax_paid_inr"]) if active_prof else 0.0,
+                    step=5000.0
+                )
+                tds_credit = st.number_input(
+                    "TDS Credits Available (₹)",
+                    min_value=0.0,
+                    value=float(active_prof["tds_credits_inr"]) if active_prof else 0.0,
+                    step=2500.0
+                )
+                if st.form_submit_button("Update Tax Profile"):
+                    upsert_tax_profile(
+                        other_annual_income_inr=other_inc,
+                        advance_tax_paid_inr=adv_tax,
+                        tds_credits_inr=tds_credit,
+                    )
+                    st.success("Tax profile updated!")
+                    st.rerun()
 
     with bank_col:
         st.markdown("#### 🏦 Import Bank Statement CSV & Reconcile")
@@ -771,7 +833,7 @@ with tabs[4]:
 
     with calc_c1:
         st.markdown("#### Minimum Quote Safeguard")
-        st.caption("Never accept jobs that fall below our minimum 50% contribution margin threshold.")
+        st.caption("Never accept jobs that fall below our minimum 50% contribution margin threshold. Quote calculator provides a pre-tax contribution estimate, not a take-home profit quote; excludes general overhead, client acquisition, rework/refunds, income tax, and GST.")
         q_hours = st.number_input("Project Estimated Hours", min_value=0.5, max_value=40.0, value=3.0, step=0.5)
         q_direct = st.number_input("Direct Costs (Data / APIs) ₹", min_value=0.0, value=200.0, step=50.0)
         q_hourly = st.number_input("Desired Minimum Hourly Return (₹/hr)", min_value=1000.0, value=2000.0, step=250.0)

@@ -6,7 +6,8 @@ from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 from typing import Any, Generator
 
-from core.config import DB_PATH, ensure_directories
+import core.config
+from core.config import ensure_directories
 
 
 def utc_now() -> str:
@@ -16,7 +17,7 @@ def utc_now() -> str:
 @contextmanager
 def connect() -> Generator[sqlite3.Connection, None, None]:
     ensure_directories()
-    conn = sqlite3.connect(DB_PATH, timeout=30.0)
+    conn = sqlite3.connect(core.config.DB_PATH, timeout=30.0)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA foreign_keys = ON")
     conn.execute("PRAGMA journal_mode = WAL")
@@ -235,12 +236,32 @@ def init_db() -> None:
                 status TEXT NOT NULL DEFAULT 'tracking',
                 created_at TEXT NOT NULL
             );
+
+            CREATE TABLE IF NOT EXISTS bank_accounts (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                account_name TEXT NOT NULL,
+                opening_balance_inr REAL,
+                as_of_date TEXT,
+                is_confirmed INTEGER NOT NULL DEFAULT 0,
+                confirmed_at TEXT,
+                created_at TEXT NOT NULL
+            );
             """
         )
-        # Check column migration for content_hash in existing tables
+        # Check column migrations in existing tables
         cols = [r["name"] for r in conn.execute("PRAGMA table_info(opportunities)").fetchall()]
         if "content_hash" not in cols:
             conn.execute("ALTER TABLE opportunities ADD COLUMN content_hash TEXT DEFAULT ''")
+
+        exp_cols = [r["name"] for r in conn.execute("PRAGMA table_info(expenses)").fetchall()]
+        if "ca_review_confirmed" not in exp_cols:
+            conn.execute("ALTER TABLE expenses ADD COLUMN ca_review_confirmed INTEGER NOT NULL DEFAULT 0")
+        if "ca_review_notes" not in exp_cols:
+            conn.execute("ALTER TABLE expenses ADD COLUMN ca_review_notes TEXT DEFAULT ''")
+        if "reviewed_by" not in exp_cols:
+            conn.execute("ALTER TABLE expenses ADD COLUMN reviewed_by TEXT DEFAULT ''")
+        if "reviewed_at" not in exp_cols:
+            conn.execute("ALTER TABLE expenses ADD COLUMN reviewed_at TEXT")
 
 
 def log_event(event: str, details: str) -> None:
@@ -934,8 +955,127 @@ def verify_invoice_payment(
             ),
         )
 
+        # Post to M6 financial_transactions ledger once
+        existing_tx = conn.execute(
+            "SELECT id FROM financial_transactions WHERE reference_id=? AND tx_type='client_receipt'",
+            (inv["invoice_number"],),
+        ).fetchone()
+        if not existing_tx:
+            subtotal = float(inv["amount_subtotal"])
+            tax_amt = float(inv["tax_amount"])
+            conn.execute(
+                """INSERT INTO financial_transactions (
+                    tx_date, tx_type, amount_inr, amount_paise, currency,
+                    reference_id, description, is_reversal, created_at
+                ) VALUES (?, 'client_receipt', ?, ?, 'INR', ?, ?, 0, ?)""",
+                (
+                    now[:10],
+                    subtotal,
+                    int(round(subtotal * 100)),
+                    inv["invoice_number"],
+                    f"Owner-confirmed client receipt for {inv['invoice_number']} ({inv['client_name']})",
+                    now,
+                ),
+            )
+            if tax_amt > 0:
+                conn.execute(
+                    """INSERT INTO financial_transactions (
+                        tx_date, tx_type, amount_inr, amount_paise, currency,
+                        reference_id, description, is_reversal, created_at
+                    ) VALUES (?, 'gst_collected', ?, ?, 'INR', ?, ?, 0, ?)""",
+                    (
+                        now[:10],
+                        tax_amt,
+                        int(round(tax_amt * 100)),
+                        inv["invoice_number"],
+                        f"GST collected on {inv['invoice_number']}",
+                        now,
+                    ),
+                )
+
     log_event("invoice_payment_verified", f"invoice_id={invoice_id}; ref={payment_reference}; amount={amt}")
     return get_invoice(invoice_id)  # type: ignore[return-value]
+
+
+def set_bank_opening_balance(
+    balance_inr: float,
+    as_of_date: str = "",
+    account_name: str = "Primary Operating Account",
+    is_confirmed: bool = True,
+) -> int:
+    """Sets owner-confirmed bank statement opening/closing balance and date."""
+    if not math.isfinite(balance_inr):
+        raise ValueError("Bank balance must be a finite number")
+    date_val = as_of_date.strip() if as_of_date else utc_now()[:10]
+    with connect() as conn:
+        conn.execute("DELETE FROM bank_accounts WHERE account_name = ?", (account_name,))
+        cur = conn.execute(
+            """INSERT INTO bank_accounts (
+                account_name, opening_balance_inr, as_of_date, is_confirmed, confirmed_at, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?)""",
+            (
+                account_name,
+                float(balance_inr),
+                date_val,
+                1 if is_confirmed else 0,
+                utc_now() if is_confirmed else None,
+                utc_now(),
+            ),
+        )
+        return int(cur.lastrowid)
+
+
+def get_bank_opening_balance(account_name: str = "Primary Operating Account") -> dict[str, Any] | None:
+    """Returns the current owner-confirmed bank opening/closing balance, or None if unconfirmed."""
+    with connect() as conn:
+        row = conn.execute(
+            "SELECT * FROM bank_accounts WHERE account_name = ? AND is_confirmed = 1 ORDER BY id DESC LIMIT 1",
+            (account_name,),
+        ).fetchone()
+        return dict(row) if row else None
+
+
+def upsert_tax_profile(
+    profile_name: str = "Primary Proprietor",
+    entity_type: str = "individual_sole_proprietor",
+    residential_status: str = "resident",
+    tax_year: str = "2026-27",
+    regime: str = "new_2025",
+    other_annual_income_inr: float = 0.0,
+    advance_tax_paid_inr: float = 0.0,
+    tds_credits_inr: float = 0.0,
+) -> int:
+    """Inserts or updates the active tax profile."""
+    with connect() as conn:
+        conn.execute("UPDATE tax_profiles SET is_active = 0 WHERE is_active = 1")
+        cur = conn.execute(
+            """INSERT INTO tax_profiles (
+                profile_name, entity_type, residential_status, tax_year, regime,
+                other_annual_income_inr, advance_tax_paid_inr, tds_credits_inr,
+                is_active, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1, ?)""",
+            (
+                profile_name[:100],
+                entity_type[:50],
+                residential_status[:50],
+                tax_year[:20],
+                regime[:50],
+                max(0.0, float(other_annual_income_inr)),
+                max(0.0, float(advance_tax_paid_inr)),
+                max(0.0, float(tds_credits_inr)),
+                utc_now(),
+            ),
+        )
+        return int(cur.lastrowid)
+
+
+def get_active_tax_profile() -> dict[str, Any] | None:
+    """Retrieves the active tax profile, or None if none configured."""
+    with connect() as conn:
+        row = conn.execute(
+            "SELECT * FROM tax_profiles WHERE is_active = 1 ORDER BY id DESC LIMIT 1"
+        ).fetchone()
+        return dict(row) if row else None
 
 
 def create_revision_request(task_id: int, client_feedback: str) -> int:

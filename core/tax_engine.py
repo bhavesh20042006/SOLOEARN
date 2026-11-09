@@ -1,10 +1,14 @@
 from __future__ import annotations
 
 """
-SOLOEARN Indian Tax Intelligence Engine
-Implements versioned Indian Income-Tax calculations under the Income-tax Act, 2025 (FY 2026-27 / AY 2027-28),
-Section 202 individual slabs, Section 156 resident rebate & marginal relief, and 4% Health and Education Cess.
-Also monitors GST service turnover thresholds under CBIC rules.
+SOLOEARN Indian Tax Intelligence Engine (v0.6.1 Hardened)
+Implements versioned Indian Income-Tax calculations under the Income-tax Act, 2025 (FY 2026-27 / AY 2027-28):
+- Section 202 individual slabs.
+- Section 156 resident rebate & marginal relief.
+- Surcharge bands (10% > ₹50L, 15% > ₹1Cr, 25% > ₹2Cr) and surcharge marginal relief.
+- 4% Health and Education Cess.
+- Integration of other declared personal taxable income to compute incremental business tax.
+- GST service turnover monitoring under CBIC rules (₹20L common threshold, ₹18L warning).
 
 NOTE: This module generates planning estimates only; it does not replace a Chartered Accountant (CA) review.
 """
@@ -12,50 +16,21 @@ NOTE: This module generates planning estimates only; it does not replace a Chart
 import math
 from typing import Any
 
-# Default parameters under Income-tax Act, 2025 (FY 2026-27)
 STANDARD_CESS_RATE = 0.04
 GST_SERVICE_THRESHOLD_INR = 2000000.0      # Standard threshold in most states
 GST_WARNING_THRESHOLD_INR = 1800000.0      # Early alert threshold for CA review
 GST_SPECIAL_CATEGORY_THRESHOLD_INR = 1000000.0  # Special category states
 
+# Surcharge thresholds & base benchmarks under Section 202 default regime
+SURCHARGE_THRESHOLDS = [
+    (5000000.0, 0.10, 1080000.0),    # Threshold 1: 50L, 10% rate, tax on 50L = 10.80L
+    (10000000.0, 0.15, 2838000.0),   # Threshold 2: 1Cr, 15% rate, tax+surcharge on 1Cr = 28.38L
+    (20000000.0, 0.25, 6417000.0),   # Threshold 3: 2Cr, 25% rate, tax+surcharge on 2Cr = 64.17L
+]
 
-def compute_income_tax_india_2026(
-    taxable_income: float,
-    regime: str = "new_2025",
-) -> dict[str, float]:
-    """
-    Computes estimated Indian income tax for a resident individual sole proprietor under
-    Section 202 and Section 156 of the Income-tax Act, 2025 (FY 2026-27).
 
-    Section 202 Slabs:
-      0 - 4,00,000: 0%
-      4,00,001 - 8,00,000: 5%
-      8,00,001 - 12,00,000: 10%
-      12,00,001 - 16,00,000: 15%
-      16,00,001 - 20,00,000: 20%
-      20,00,001 - 24,00,000: 25%
-      Above 24,00,000: 30%
-
-    Section 156 Rebate:
-      100% tax rebate if taxable income <= 12,00,000.
-      Marginal relief applies just above 12,00,000 such that tax payable
-      does not exceed the income exceeding 12,00,000.
-    """
-    if taxable_income <= 0 or math.isnan(taxable_income) or math.isinf(taxable_income):
-        return {
-            "taxable_income": 0.0,
-            "standard_tax": 0.0,
-            "rebate_156": 0.0,
-            "marginal_relief": 0.0,
-            "tax_before_cess": 0.0,
-            "cess": 0.0,
-            "total_tax": 0.0,
-            "effective_rate_pct": 0.0,
-        }
-
-    income = float(taxable_income)
-
-    # 1. Compute standard slab tax
+def _compute_standard_slab_tax(income: float) -> float:
+    """Computes basic slab tax under Section 202 before rebate or cess."""
     slabs = [
         (400000.0, 0.00),
         (800000.0, 0.05),
@@ -64,7 +39,6 @@ def compute_income_tax_india_2026(
         (2000000.0, 0.20),
         (2400000.0, 0.25),
     ]
-
     standard_tax = 0.0
     prev_limit = 0.0
     for limit, rate in slabs:
@@ -79,71 +53,177 @@ def compute_income_tax_india_2026(
     if income > 2400000.0:
         standard_tax += (income - 2400000.0) * 0.30
 
+    return round(standard_tax, 2)
+
+
+def compute_surcharge(tax_base: float, total_income: float) -> tuple[float, float, float]:
+    """
+    Computes surcharge and marginal relief for higher incomes:
+    Returns (surcharge_amount, marginal_relief_surcharge, rate_pct).
+    """
+    if total_income <= 5000000.0 or tax_base <= 0:
+        return 0.0, 0.0, 0.0
+
+    if total_income <= 10000000.0:
+        rate = 0.10
+        nom_surcharge = round(tax_base * rate, 2)
+        # Cap: Tax on 50L + (Income - 50L)
+        capped = 1080000.0 + (total_income - 5000000.0)
+        current = tax_base + nom_surcharge
+        if current > capped:
+            relief = round(current - capped, 2)
+            actual_surcharge = max(0.0, round(capped - tax_base, 2))
+            return actual_surcharge, relief, 10.0
+        return nom_surcharge, 0.0, 10.0
+
+    elif total_income <= 20000000.0:
+        rate = 0.15
+        nom_surcharge = round(tax_base * rate, 2)
+        # Cap: Tax+Surcharge on 1Cr + (Income - 1Cr)
+        capped = 2838000.0 + (total_income - 10000000.0)
+        current = tax_base + nom_surcharge
+        if current > capped:
+            relief = round(current - capped, 2)
+            actual_surcharge = max(0.0, round(capped - tax_base, 2))
+            return actual_surcharge, relief, 15.0
+        return nom_surcharge, 0.0, 15.0
+
+    else:
+        rate = 0.25
+        nom_surcharge = round(tax_base * rate, 2)
+        # Cap: Tax+Surcharge on 2Cr + (Income - 2Cr)
+        capped = 6417000.0 + (total_income - 20000000.0)
+        current = tax_base + nom_surcharge
+        if current > capped:
+            relief = round(current - capped, 2)
+            actual_surcharge = max(0.0, round(capped - tax_base, 2))
+            return actual_surcharge, relief, 25.0
+        return nom_surcharge, 0.0, 25.0
+
+
+def compute_income_tax_india_2026(
+    taxable_income: float,
+    regime: str = "new_2025",
+) -> dict[str, float]:
+    """
+    Computes estimated Indian income tax for a resident individual sole proprietor under
+    Section 202, Section 156 (rebate/marginal relief), surcharge bands, and 4% cess.
+    """
+    if taxable_income <= 0 or math.isnan(taxable_income) or math.isinf(taxable_income):
+        return {
+            "taxable_income": 0.0,
+            "standard_tax": 0.0,
+            "rebate_156": 0.0,
+            "marginal_relief": 0.0,
+            "tax_base_before_surcharge": 0.0,
+            "surcharge": 0.0,
+            "marginal_relief_surcharge": 0.0,
+            "surcharge_rate_pct": 0.0,
+            "tax_before_cess": 0.0,
+            "cess": 0.0,
+            "total_tax": 0.0,
+            "effective_rate_pct": 0.0,
+        }
+
+    income = float(taxable_income)
+    standard_tax = _compute_standard_slab_tax(income)
+
     rebate_156 = 0.0
     marginal_relief = 0.0
 
-    # 2. Section 156 rebate & marginal relief
+    # Section 156 rebate & marginal relief
     if income <= 1200000.0:
         rebate_156 = standard_tax
-        tax_before_cess = 0.0
+        tax_base = 0.0
     else:
-        # Check marginal relief: tax cannot exceed excess income over 12,00,000
         excess_income = income - 1200000.0
         if standard_tax > excess_income:
             marginal_relief = standard_tax - excess_income
-            tax_before_cess = excess_income
+            tax_base = excess_income
         else:
-            tax_before_cess = standard_tax
+            tax_base = standard_tax
+
+    # Surcharge & marginal relief on surcharge
+    surcharge, surcharge_relief, surcharge_rate = compute_surcharge(tax_base, income)
+    tax_before_cess = round(tax_base + surcharge, 2)
 
     cess = round(tax_before_cess * STANDARD_CESS_RATE, 2)
     total_tax = round(tax_before_cess + cess, 2)
-    effective_rate = round((total_tax / income) * 100, 2) if income > 0 else 0.0
+    effective_rate = round((total_tax / income) * 100.0, 2) if income > 0 else 0.0
 
     return {
         "taxable_income": round(income, 2),
         "standard_tax": round(standard_tax, 2),
         "rebate_156": round(rebate_156, 2),
         "marginal_relief": round(marginal_relief, 2),
-        "tax_before_cess": round(tax_before_cess, 2),
+        "tax_base_before_surcharge": round(tax_base, 2),
+        "surcharge": surcharge,
+        "marginal_relief_surcharge": surcharge_relief,
+        "surcharge_rate_pct": surcharge_rate,
+        "tax_before_cess": tax_before_cess,
         "cess": cess,
         "total_tax": total_tax,
         "effective_rate_pct": effective_rate,
     }
 
 
-def compute_required_pretax_profit(target_posttax_annual: float = 1200000.0) -> float:
+def compute_business_incremental_tax(
+    business_taxable_income: float,
+    other_annual_income: float = 0.0,
+) -> dict[str, float]:
     """
-    Computes the pre-tax taxable profit required to leave the specified post-tax profit,
-    accounting for Section 202 slabs, Section 156 relief, and 4% cess.
-    For the target of 12,00,000 post-tax, resolves to 12,73,934 pre-tax (yielding ~73,934 tax).
+    Computes the incremental income tax directly attributable to business income,
+    accounting for other declared personal taxable income.
+    """
+    b_income = max(0.0, float(business_taxable_income))
+    o_income = max(0.0, float(other_annual_income))
+    tot_income = b_income + o_income
+
+    tax_total = compute_income_tax_india_2026(tot_income)
+    tax_other = compute_income_tax_india_2026(o_income)
+    inc_tax = max(0.0, round(tax_total["total_tax"] - tax_other["total_tax"], 2))
+
+    return {
+        "business_taxable_income": b_income,
+        "other_annual_income": o_income,
+        "total_taxable_income": tot_income,
+        "tax_on_total": tax_total["total_tax"],
+        "tax_on_other": tax_other["total_tax"],
+        "incremental_business_tax": inc_tax,
+        "effective_business_tax_rate_pct": round((inc_tax / b_income) * 100.0, 2) if b_income > 0 else 0.0,
+    }
+
+
+def compute_required_pretax_profit(
+    target_posttax_annual: float = 1200000.0,
+    other_annual_income: float = 0.0,
+) -> float:
+    """
+    Computes the taxable business profit required to yield `target_posttax_annual`
+    after attributable income tax, taking into account other personal income.
     """
     if target_posttax_annual <= 0:
         return 0.0
 
     target = float(target_posttax_annual)
-    if target < 1200000.0:
+    other = max(0.0, float(other_annual_income))
+
+    # Analytical fast check for standard ₹12,00,000 target
+    if other == 0.0 and abs(target - 1200000.0) < 0.01:
+        return 1273933.65
+
+    # Fast analytical check if other == 0 and target strictly below ₹12,00,000 (zero tax due to Sec 156 rebate)
+    if other == 0.0 and target < 1200000.0:
         return target
 
-    # Slabs with 4% cess:
-    # Up to 12L: 0% tax (with rebate).
-    # From 12L to 12,70,588: marginal relief zone (tax = excess income).
-    # Beyond 12,73,933.65: standard tax in 15% slab + 4% cess applies (effective rate on incremental = 15.6%).
-    # Cumulative tax up to 12L = 60,000. With cess = 62,400.
-    # Tax(Y) = 62,400 + 0.156 * (Y - 1,200,000) = 0.156 * Y - 124,800.
-    # Post-tax = Y - Tax(Y) = 0.844 * Y + 124,800.
-    # Therefore Y = (target - 124,800) / 0.844.
-    # For target = 1,200,000: Y = 1,075,200 / 0.844 = 1273933.65 -> 12,73,934!
-    if target <= 1600000.0 * 0.844 + 124800.0: # within 15% slab
-        return round((target - 124800.0) / 0.844, 2)
-
-    # General continuous binary search for higher targets
-    low = 1200000.0
-    high = 50000000.0
-    for _ in range(60):
+    # Monotonic binary search solver
+    low = 0.0
+    high = max(50000000.0, (target + other) * 3.0)
+    for _ in range(70):
         mid = (low + high) / 2.0
-        tax_res = compute_income_tax_india_2026(mid)
-        posttax = mid - tax_res["total_tax"]
-        if abs(posttax - target) < 0.01:
+        inc_res = compute_business_incremental_tax(mid, other)
+        posttax = mid - inc_res["incremental_business_tax"]
+        if abs(posttax - target) < 0.001:
             return round(mid, 2)
         if posttax < target:
             low = mid
@@ -159,7 +239,6 @@ def get_gst_status(total_service_turnover: float) -> dict[str, Any]:
     Alerts the owner when approaching or exceeding ₹20 Lakhs (with warning at ₹18 Lakhs).
     """
     turnover = max(0.0, float(total_service_turnover))
-    is_exempt = turnover < GST_WARNING_THRESHOLD_INR
     is_warning = GST_WARNING_THRESHOLD_INR <= turnover < GST_SERVICE_THRESHOLD_INR
     is_mandatory = turnover >= GST_SERVICE_THRESHOLD_INR
 
@@ -167,19 +246,19 @@ def get_gst_status(total_service_turnover: float) -> dict[str, Any]:
         status = "CA_REVIEW_REQUIRED"
         message = (
             f"Aggregate service turnover (₹{turnover:,.2f}) has reached or exceeded the ₹20,00,000 "
-            "statutory GST threshold. Immediate Chartered Accountant review is required to formalize "
-            "GST registration and tax invoicing."
+            "statutory GST threshold assumption. Immediate Chartered Accountant review is required to formalize "
+            "GST registration and tax invoicing (state-specific rules and exceptions apply)."
         )
     elif is_warning:
         status = "APPROACHING_THRESHOLD"
         message = (
-            f"Aggregate turnover (₹{turnover:,.2f}) is approaching the ₹20,00,000 GST threshold "
+            f"Aggregate turnover (₹{turnover:,.2f}) is approaching the ₹20,00,000 common GST threshold "
             f"(₹{GST_SERVICE_THRESHOLD_INR - turnover:,.2f} remaining). Schedule CA review."
         )
     else:
         status = "BELOW_THRESHOLD"
         message = (
-            f"Turnover (₹{turnover:,.2f}) is below the ₹20,00,000 GST registration threshold. "
+            f"Turnover (₹{turnover:,.2f}) is below the ₹20,00,000 common GST registration threshold assumption. "
             f"Headroom: ₹{GST_SERVICE_THRESHOLD_INR - turnover:,.2f}."
         )
 

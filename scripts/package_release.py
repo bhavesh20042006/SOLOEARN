@@ -4,9 +4,12 @@ from pathlib import Path
 
 root = Path(r"C:\Users\BHAVESH KHULLAR\Downloads\SOLOEARN_v0.1\SOLOEARN")
 out_zips = [
-    Path(r"C:\Users\BHAVESH KHULLAR\Desktop\SOLOEARN_Milestone5.3_Ready.zip"),
-    Path(r"C:\Users\BHAVESH KHULLAR\Downloads\SOLOEARN_Milestone5.3_Ready.zip"),
-    Path(r"C:\Users\BHAVESH KHULLAR\Downloads\SOLOEARN_v0.1\SOLOEARN_Milestone5.3_Ready.zip"),
+    Path(r"C:\Users\BHAVESH KHULLAR\Desktop\SOLOEARN_Milestone6.1_Ready.zip"),
+    Path(r"C:\Users\BHAVESH KHULLAR\Downloads\SOLOEARN_Milestone6.1_Ready.zip"),
+    Path(r"C:\Users\BHAVESH KHULLAR\Downloads\SOLOEARN_v0.1\SOLOEARN_Milestone6.1_Ready.zip"),
+    Path(r"C:\Users\BHAVESH KHULLAR\Desktop\SOLOEARN_Milestone6_Ready.zip"),
+    Path(r"C:\Users\BHAVESH KHULLAR\Downloads\SOLOEARN_Milestone6_Ready.zip"),
+    Path(r"C:\Users\BHAVESH KHULLAR\Downloads\SOLOEARN_v0.1\SOLOEARN_Milestone6_Ready.zip"),
 ]
 
 exclude_dirs = {".git", ".venv", "__pycache__", ".pytest_cache"}
@@ -31,6 +34,11 @@ def should_exclude(rel_path: Path):
 for out_zip in out_zips:
     with zipfile.ZipFile(out_zip, "w", zipfile.ZIP_DEFLATED) as zf:
         for file_path in sorted(root.rglob("*")):
+            # Skip any symbolic link or files within symlinked directories
+            if file_path.is_symlink():
+                continue
+            if any(p.is_symlink() for p in file_path.parents if p != root and root in p.parents):
+                continue
             if file_path.is_file():
                 rel = file_path.relative_to(root)
                 if not should_exclude(rel):

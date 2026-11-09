@@ -5,6 +5,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
+import core.config
 from core.db import connect, create_invoice, init_db, add_opportunity, update_opportunity_status
 from core.financial_ledger import (
     get_cash_and_reserves_summary,
@@ -35,7 +36,14 @@ from core.tax_engine import (
 
 class Milestone6NetProfitTests(unittest.TestCase):
     def setUp(self):
+        self.temp_dir = tempfile.TemporaryDirectory()
+        self._orig_db_path = core.config.DB_PATH
+        core.config.DB_PATH = Path(self.temp_dir.name) / "test_soloearn.sqlite3"
         init_db()
+
+    def tearDown(self):
+        core.config.DB_PATH = self._orig_db_path
+        self.temp_dir.cleanup()
 
     # -----------------------------------------------------------------------
     # 1. INDIAN TAX INTELLIGENCE ENGINE TESTS
@@ -143,6 +151,7 @@ class Milestone6NetProfitTests(unittest.TestCase):
             amount_inr=1250.0,
             tax_deductibility="deductible",
             reviewer_notes="Monthly hosting cost",
+            ca_review_confirmed=True,
         )
         self.assertGreater(exp_id, 0)
 
