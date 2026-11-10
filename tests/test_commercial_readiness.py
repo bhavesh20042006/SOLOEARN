@@ -132,6 +132,30 @@ class CommercialReadinessTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             calculate_project_unit_economics(gross_price_inr=5000.0, platform_fee_pct=90.0)
 
+    def test_real_smb_pilot_targets_seeding_and_milestones(self):
+        from core.commercial_funnel import (
+            REAL_SMB_PILOT_TARGETS,
+            get_commercial_pilot_milestones,
+            list_commercial_leads,
+            seed_real_smb_pilot_leads,
+        )
+
+        self.assertEqual(len(REAL_SMB_PILOT_TARGETS), 5)
+        added = seed_real_smb_pilot_leads()
+        self.assertEqual(added, 5)
+        leads = list_commercial_leads()
+        self.assertEqual(len(leads), 5)
+
+        # Idempotent re-seed
+        added_again = seed_real_smb_pilot_leads()
+        self.assertEqual(added_again, 0)
+
+        # Milestones
+        milestones = get_commercial_pilot_milestones()
+        self.assertEqual(len(milestones), 6)
+        self.assertFalse(milestones[0]["achieved"])
+        self.assertEqual(milestones[0]["milestone"], "1. First Customer")
+
 
 if __name__ == "__main__":
     unittest.main()

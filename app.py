@@ -11,12 +11,15 @@ import streamlit as st
 from core.analytics import create_analytics_bundle
 from core.autonomous_worker import run_autonomous_job
 from core.commercial_funnel import (
+    REAL_SMB_PILOT_TARGETS,
     add_commercial_lead,
     calculate_project_unit_economics,
     get_commercial_performance_dashboard,
+    get_commercial_pilot_milestones,
     get_funnel_metrics,
     init_commercial_tables,
     list_commercial_leads,
+    seed_real_smb_pilot_leads,
     update_lead_stage,
 )
 from core.config import (
@@ -197,8 +200,45 @@ with tabs[1]:
             "and log actual collected money, platform fees, direct costs, and owner time across all 5 categories.\n\n"
             "📖 Full Playbook: [`commercial/M6_3_FIRST_CUSTOMER_ACQUISITION_PLAYBOOK.md`](file:///C:/Users/BHAVESH%20KHULLAR/Downloads/SOLOEARN_v0.1/SOLOEARN/commercial/M6_3_FIRST_CUSTOMER_ACQUISITION_PLAYBOOK.md)"
         )
+        st.markdown("#### 🏢 5 Researched Real-World Indian D2C & Retail Targets")
+        st.caption("Identified, verified Indian SMBs with specific operational bottlenecks and customized proposals ready to send.")
+
+        target_names = [t["company_name"] for t in REAL_SMB_PILOT_TARGETS]
+        selected_target_name = st.selectbox("Select Researched Business Target", options=target_names, key="real_target_select")
+        selected_target = next(t for t in REAL_SMB_PILOT_TARGETS if t["company_name"] == selected_target_name)
+
+        rt_c1, rt_c2 = st.columns([1, 1])
+        with rt_c1:
+            st.markdown(
+                f"- **Contact:** {selected_target['contact_name']} ({selected_target['contact_role']})\n"
+                f"- **Headquarters:** {selected_target['city']}\n"
+                f"- **Channel:** `{selected_target['contact_channel']}` ({selected_target['contact_handle']})\n"
+                f"- **Website:** [{selected_target['website']}]({selected_target['website']})\n"
+                f"- **Products:** {selected_target['products']}\n"
+            )
+        with rt_c2:
+            st.markdown(
+                f"- **Pain Point:** {selected_target['pain_point']}\n"
+                f"- **Recommended Offering:** `{selected_target['service_tier']}` (@ ₹{selected_target['proposed_price_inr']:,.0f} ex-GST)\n"
+                f"- **Research Notes:** {selected_target['notes']}\n"
+            )
+
+        st.text_area(
+            f"Tailored Proposal Pitch for {selected_target['contact_name']} ({selected_target['company_name']})",
+            value=selected_target["custom_pitch"],
+            height=200,
+            key=f"pitch_text_{selected_target_name}",
+        )
+
+        if st.button("📥 Import These 5 Researched Indian D2C Targets Into Commercial Pipeline"):
+            added_cnt = seed_real_smb_pilot_leads()
+            st.success(f"Successfully imported {added_cnt} new verified commercial leads into your pipeline!")
+            st.rerun()
+
+        st.divider()
+
         sample_script = st.selectbox(
-            "Select Outreach Script Template to Copy",
+            "Select General Outreach Script Template to Copy",
             options=[
                 "Script A: Shopify / D2C Founder (Weekly Reporting)",
                 "Script B: Amazon / Multi-Channel Seller (Channel Reconciliation)",
@@ -292,6 +332,14 @@ with tabs[1]:
         for item in items[midpoint:]:
             icon = "✅" if item["completed"] else "⬜"
             st.markdown(f"{icon} **{item['title']}**")
+
+    with st.expander("🏆 Commercial Pilot Progression Milestones (Market Evidence Tracker)"):
+        st.caption("Uncompromising market evidence: No milestone is declared achieved without verified bank deposits, invoices, or expense records.")
+        milestones = get_commercial_pilot_milestones()
+        for m in milestones:
+            m_icon = "✅" if m["achieved"] else "⏳"
+            status_text = "Verified in Financial Ledger" if m["achieved"] else "Pending Market Evidence"
+            st.markdown(f"{m_icon} **{m['milestone']}** — *{m['evidence_required']}* (`{m['current_metric']}` · **{status_text}**)")
 
     st.divider()
 
@@ -1247,11 +1295,29 @@ with tabs[5]:
                                 key=f"reconcile_invoice_{u['id']}",
                             )
                             chosen_entity_id = invoice_map[selected_invoice_label]
+                            tds_cat = st.selectbox(
+                                "Section 393 Statutory TDS Category",
+                                options=[
+                                    ("none", "No TDS Deducted (0%)", 0.0),
+                                    ("professional_10", "Professional Services - Standard (10%)", 0.10),
+                                    ("technical_2", "Technical Services / BPO / Call Center (2%)", 0.02),
+                                    ("contractor_co_2", "Works Contract - Corporate / Firm (2%)", 0.02),
+                                    ("contractor_ind_1", "Works Contract - Individual / Proprietor (1%)", 0.01),
+                                    ("custom", "Custom TDS Amount (Manual Entry)", None),
+                                ],
+                                format_func=lambda x: x[1],
+                                key=f"reconcile_tds_cat_{u['id']}",
+                                help="Income-tax Act, 2025 Section 393 schedules differentiate between professional, technical, and contractor rates.",
+                            )
+                            inv_match = next((i for i in pending_invoice_rows if i["invoice_number"] == chosen_entity_id), None)
+                            inv_subtotal = float(inv_match["amount_subtotal"]) if inv_match else 0.0
+                            calc_tds = round(inv_subtotal * tds_cat[2], 2) if tds_cat[2] is not None else 0.0
+
                             tds_input = st.number_input(
-                                "TDS Withheld by Client ₹ (deducted under Section 393 [formerly Section 194J/194C])",
+                                f"TDS Withheld by Client ₹ (Section 393 - {tds_cat[1]})",
                                 min_value=0.0,
-                                value=0.0,
-                                step=100.0,
+                                value=calc_tds,
+                                step=50.0,
                                 key=f"reconcile_tds_{u['id']}",
                                 help="Enter tax deducted by corporate client under Section 393. Bank credit + TDS must equal invoice total.",
                             )

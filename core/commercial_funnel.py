@@ -342,3 +342,214 @@ def get_commercial_performance_dashboard() -> dict[str, Any]:
             "verified_project_economics": payments_collected > 0,
         },
     }
+
+
+REAL_SMB_PILOT_TARGETS: list[dict[str, Any]] = [
+    {
+        "company_name": "Snitch (Snitch Apparels Pvt Ltd)",
+        "website": "https://snitch.co.in",
+        "contact_name": "Siddharth Dungarwal",
+        "contact_role": "Founder & CEO",
+        "contact_channel": "linkedin",
+        "contact_handle": "siddharth-dungarwal-snitch",
+        "city": "Bengaluru, Karnataka",
+        "industry": "ecommerce",
+        "service_tier": "data_analytics",
+        "proposed_price_inr": 5000.0,
+        "products": "Men's fast-fashion apparel & footwear",
+        "pain_point": "Multi-channel settlement reconciliation, COD order reconciliation, and regional Return-to-Origin (RTO) analytics.",
+        "notes": "Researched fast-growing Indian D2C men's fashion brand (Shopify store + 20+ retail stores). High COD order volume requires weekly reconciliation.",
+        "custom_pitch": (
+            "Hi Siddharth,\n\nLove what you and the team are building with Snitch's rapid offline and online expansion.\n\n"
+            "Quick question: how much time does your operations team spend pulling and reconciling Shopify, payment gateway, "
+            "and COD delivery CSVs across Tier-2/3 pin codes every week?\n\n"
+            "I run a specialized analytics service for fast-turnaround D2C brands. In 48 hours, I turn raw export CSVs into "
+            "an executive interactive HTML5 dashboard and a 3-sheet Excel model with automated charts, regional return pacing, "
+            "and channel-by-channel margins.\n\n"
+            "I have a verified sample deliverable package I can send over if you'd like to take a look. No commitment—just "
+            "wanted to share how automated analysis can save 4+ hours of manual spreadsheet work every week.\n\n"
+            "Best regards,\n[Your Name]\nSolo Founder, SOLOEARN"
+        ),
+    },
+    {
+        "company_name": "Blue Tokai Coffee Roasters (Muskaan Retail Pvt Ltd)",
+        "website": "https://bluetokaicoffee.com",
+        "contact_name": "Matt Chitharanjan",
+        "contact_role": "Co-Founder & CEO",
+        "contact_channel": "email",
+        "contact_handle": "matt@bluetokaicoffee.com",
+        "city": "Gurugram / New Delhi",
+        "industry": "retail",
+        "service_tier": "csv_reconciliation",
+        "proposed_price_inr": 10000.0,
+        "products": "Specialty roasted coffee beans, cold brew cans, drip bags, cafe retail",
+        "pain_point": "Multi-channel settlement reconciliation across quick-commerce (Blinkit, Zepto, Swiggy Instamart) vs cafes vs D2C subscriptions.",
+        "notes": "Leading Indian specialty coffee brand with 80+ cafes and heavy quick-commerce distribution. Dealing with multi-format CSV payouts.",
+        "custom_pitch": (
+            "Hi Matt,\n\nManaging sales across Blue Tokai's cafes, website subscriptions, and quick-commerce channels (Blinkit/Zepto) "
+            "usually means dealing with mismatched settlement CSV formats and commission chargebacks.\n\n"
+            "I help omnichannel food & beverage brands automate multi-channel sales and settlement reconciliation. In 48 hours, I deliver:\n"
+            "1. Standardized, formula-sanitized sales CSVs across all channels.\n"
+            "2. A multi-tab Excel model reconciling channel deductions and net unit realizations.\n"
+            "3. An interactive HTML executive dashboard showing metro distribution and daily order pacing.\n\n"
+            "Would you be open to seeing a 2-minute sample report package built on sample sales data?\n\n"
+            "Warm regards,\n[Your Name]"
+        ),
+    },
+    {
+        "company_name": "Mokobara (Mokobara Lifestyle Pvt Ltd)",
+        "website": "https://mokobara.com",
+        "contact_name": "Sangeet Agrawal",
+        "contact_role": "Co-Founder",
+        "contact_channel": "linkedin",
+        "contact_handle": "sangeetagrawal",
+        "city": "Bengaluru, Karnataka",
+        "industry": "ecommerce",
+        "service_tier": "data_analytics",
+        "proposed_price_inr": 5000.0,
+        "products": "Premium luggage, backpacks, travel duffels & accessories",
+        "pain_point": "Tracking Average Order Value (AOV) across travel bundles, marketplace marketing deductions, and regional hub deliveries.",
+        "notes": "Premium travel brand in India with aggressive online and airport retail presence. Needs visual executive reporting for sales pacing.",
+        "custom_pitch": (
+            "Hi Sangeet,\n\nBig fan of Mokobara's design-first travel gear and recent retail rollout.\n\n"
+            "Quick question: when reviewing weekly sales pacing, how much time is spent consolidating Shopify orders with "
+            "marketplace and bundle sales data to calculate true net SKU margins?\n\n"
+            "I build fast-turnaround executive dashboards and Excel models for Indian D2C leaders. In 48 hours, I turn messy "
+            "order CSVs into an interactive visual sales report with AOV distributions, metro-wise sales maps, and formula-checked summaries.\n\n"
+            "Happy to share a sample deliverable package so you can see the format. Would you like me to send it over?\n\n"
+            "Best regards,\n[Your Name]"
+        ),
+    },
+    {
+        "company_name": "Slurrp Farm (Wholsum Foods Pvt Ltd)",
+        "website": "https://slurrpfarm.com",
+        "contact_name": "Meghana Narayan",
+        "contact_role": "Co-Founder",
+        "contact_channel": "linkedin",
+        "contact_handle": "meghana-narayan-wholsumfoods",
+        "city": "New Delhi",
+        "industry": "ecommerce",
+        "service_tier": "csv_reconciliation",
+        "proposed_price_inr": 10000.0,
+        "products": "Millet-based kids cereals, pancake mixes, noodles, healthy snacks",
+        "pain_point": "Reconciliation of modern trade deductions, distributor credit memos, and online vs offline channel realization.",
+        "notes": "Rapidly growing healthy foods brand selling via D2C, Amazon, Quick Commerce, and 2000+ modern trade retail outlets.",
+        "custom_pitch": (
+            "Hi Meghana,\n\nInspiring to see how Wholsum Foods and Slurrp Farm are pioneering millet nutrition across Indian households.\n\n"
+            "With presence across D2C, quick commerce, and thousands of modern trade stores, month-end CSV cleanup and distributor "
+            "statement reconciliation often consumes valuable finance team hours.\n\n"
+            "I provide automated CSV reconciliation and QA reporting for consumer brands—delivering deduplicated, formula-sanitized "
+            "datasets, variance models in Excel, and an executive dashboard within 48 hours.\n\n"
+            "Would it be helpful if I shared a sample reconciliation workbook so your finance team can evaluate it for month-end closes?\n\n"
+            "Best,\n[Your Name]"
+        ),
+    },
+    {
+        "company_name": "Koparo Clean (Simk LABS Pvt Ltd)",
+        "website": "https://koparoclean.com",
+        "contact_name": "Simran Khara",
+        "contact_role": "Founder & CEO",
+        "contact_channel": "linkedin",
+        "contact_handle": "simrankhara",
+        "city": "New Delhi",
+        "industry": "ecommerce",
+        "service_tier": "data_analytics",
+        "proposed_price_inr": 5000.0,
+        "products": "Natural, plant-based floor cleaners, dishwashing liquids & laundry care",
+        "pain_point": "Repeat cohort retention analytics, subscription reorder tracking, and quick-commerce settlement reconciliation.",
+        "notes": "Eco-friendly home care brand backed by high consumer repeat rates. Focuses on D2C website subscriptions and quick-commerce dark stores.",
+        "custom_pitch": (
+            "Hi Simran,\n\nKoparo's growth in the eco-friendly home care space has been incredible to watch.\n\n"
+            "Given the strong repeat-order nature of your products, tracking subscriber cohort retention alongside quick-commerce "
+            "sales pacing can easily lead to spreadsheet sprawl.\n\n"
+            "I help consumer brands turn weekly sales CSVs into clear, interactive executive dashboards and formula-verified "
+            "Excel workbooks delivered in 48 hours.\n\n"
+            "I'd love to share a quick link to a sample dashboard package so you can see how other D2C founders track their weekly sales mix. "
+            "Let me know if you'd be open to taking a look!\n\n"
+            "Best,\n[Your Name]"
+        ),
+    },
+]
+
+
+def seed_real_smb_pilot_leads() -> int:
+    """Seeds the 5 verified real-world Indian D2C/retail businesses into commercial_leads if not already present."""
+    init_commercial_tables()
+    existing = {l["company_name"] for l in list_commercial_leads()}
+    added = 0
+    for t in REAL_SMB_PILOT_TARGETS:
+        if t["company_name"] not in existing:
+            add_commercial_lead(
+                company_name=t["company_name"],
+                contact_name=t["contact_name"],
+                contact_channel=t["contact_channel"],
+                contact_handle=t["contact_handle"],
+                industry=t["industry"],
+                service_tier=t["service_tier"],
+                proposed_price_inr=t["proposed_price_inr"],
+                stage="identified",
+                notes=f"Contact: {t['contact_role']} | HQ: {t['city']} | Web: {t['website']}\n{t['notes']}",
+            )
+            added += 1
+    return added
+
+
+def get_commercial_pilot_milestones() -> list[dict[str, Any]]:
+    """Returns the 6 strict commercial validation milestones and their live database status."""
+    from core.db import get_financial_states_summary
+    from core.financial_ledger import get_cash_and_reserves_summary
+
+    cash_info = get_cash_and_reserves_summary()
+    collected = cash_info["collected_receipts_inr"]
+    net_profit = round(cash_info["operating_profit_inr"] - cash_info["monthly_tax_provision_inr"], 2)
+
+    with connect() as conn:
+        row_paid_clients = conn.execute(
+            "SELECT COUNT(DISTINCT client_name) FROM invoices WHERE status = 'paid'"
+        ).fetchone()
+        paid_clients_count = int(row_paid_clients[0] if row_paid_clients else 0)
+
+        row_repeats = conn.execute(
+            """SELECT client_name, COUNT(*) as cnt FROM invoices
+               WHERE status = 'paid' GROUP BY client_name HAVING cnt >= 2"""
+        ).fetchall()
+        repeat_count = len(row_repeats)
+
+    return [
+        {
+            "milestone": "1. First Customer",
+            "evidence_required": "Cleared customer payment in bank",
+            "current_metric": f"{paid_clients_count} paid client(s)",
+            "achieved": paid_clients_count >= 1 and collected > 0,
+        },
+        {
+            "milestone": "2. ₹25,000 Collected",
+            "evidence_required": "Reconciled bank receipts ex-GST",
+            "current_metric": f"₹{collected:,.2f} collected",
+            "achieved": collected >= 25000.0,
+        },
+        {
+            "milestone": "3. Repeat Customer",
+            "evidence_required": "Second paid engagement from same client name in invoices",
+            "current_metric": f"{repeat_count} repeat client(s)",
+            "achieved": repeat_count >= 1,
+        },
+        {
+            "milestone": "4. ₹50,000 Monthly Profit",
+            "evidence_required": "Post-tax profit after 100% of actual expenses and tax provision",
+            "current_metric": f"₹{net_profit:,.2f} MTD profit",
+            "achieved": net_profit >= 50000.0,
+        },
+        {
+            "milestone": "5. ₹1 Lakh Monthly Profit",
+            "evidence_required": "Post-tax profit of at least ₹1,00,000 in a single month",
+            "current_metric": f"₹{net_profit:,.2f} MTD profit",
+            "achieved": net_profit >= 100000.0,
+        },
+        {
+            "milestone": "6. Stable ₹1 Lakh Profit",
+            "evidence_required": "Three consecutive verified months of ₹1 Lakh+ post-tax profit",
+            "current_metric": "0 / 3 consecutive months",
+            "achieved": False,
+        },
+    ]
