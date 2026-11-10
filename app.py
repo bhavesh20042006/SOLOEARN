@@ -141,7 +141,7 @@ cols[3].metric("Completed tasks", m["completed_tasks"])
 
 tabs = st.tabs([
     "Overview",
-    "Commercial Hub & Acquisition (M6.2)",
+    "Commercial Hub & Acquisition (M6.3)",
     "Autonomous Discovery (M4)",
     "Opportunity Pipeline",
     "Revenue Operations & Invoicing (M5)",
@@ -184,10 +184,65 @@ with tabs[0]:
         st.info("No tasks yet. Try the CSV Workbench or Autonomous Discovery.")
 
 
-# ----------------- Tab 1: Commercial Hub & Client Acquisition (M6.2) -----------------
+# ----------------- Tab 1: Commercial Hub & Client Acquisition (M6.3) -----------------
 with tabs[1]:
-    st.subheader("🎯 Commercial Hub & Client Acquisition (Milestone 6.2)")
-    st.caption("Operational playbook for acquiring the first three paying pilot customers (50/30/5/3 Campaign) and evaluating real post-tax project unit economics.")
+    st.subheader("🎯 Commercial Hub & First Customer Acquisition Pilot (Milestone 6.3)")
+    st.caption("Operational playbook for acquiring the first paying pilot customer through a controlled 5-prospect experiment. All prices quoted strictly ex-GST.")
+
+    with st.expander("🚀 M6.3 First Commercial Experiment: 5 Genuine Businesses (Click to View Outreach Scripts)"):
+        st.markdown(
+            "**Operational Goal:** Approach 5 real SMB businesses (small e-commerce sellers/retailers), offer a tightly-scoped "
+            "**₹5,000 ex-GST Tier 1 Analytics Pack** using the verified sample deliverables in `workspaces/task_0469/deliverables.zip` as demonstration, "
+            "and log actual collected money, platform fees, direct costs, and owner time across all 5 categories.\n\n"
+            "📖 Full Playbook: [`commercial/M6_3_FIRST_CUSTOMER_ACQUISITION_PLAYBOOK.md`](file:///C:/Users/BHAVESH%20KHULLAR/Downloads/SOLOEARN_v0.1/SOLOEARN/commercial/M6_3_FIRST_CUSTOMER_ACQUISITION_PLAYBOOK.md)"
+        )
+        sample_script = st.selectbox(
+            "Select Outreach Script Template to Copy",
+            options=[
+                "Script A: Shopify / D2C Founder (Weekly Reporting)",
+                "Script B: Amazon / Multi-Channel Seller (Channel Reconciliation)",
+                "Script C: Retail / Wholesale Merchant (Order Pacing)",
+                "Script D: Accounting / Finance Lead (CSV Deduplication & QA)",
+                "Script E: Warm Network / Referral",
+            ],
+        )
+        scripts_map = {
+            "Script A: Shopify / D2C Founder (Weekly Reporting)": (
+                "Hi [Name],\n\nI saw you're leading [Brand Name]—great work on the recent [product line/milestone].\n\n"
+                "Quick question: how much time does your team spend manually pulling and cleaning Shopify/gateway CSVs every week for executive sales reporting?\n\n"
+                "I build automated analytics and reporting models for D2C brands. In 48 hours, I turn raw e-commerce export CSVs into an executive interactive HTML dashboard and an Excel model with automated charts and customer regional breakdowns.\n\n"
+                "I have a live sample report and 3-sheet model I can send over if you'd like to take a look. No commitment—just wanted to share how other founders are eliminating 4+ hours of manual spreadsheet work every week.\n\n"
+                "Best,\n[Your Name]\nSolo Founder, SOLOEARN"
+            ),
+            "Script B: Amazon / Multi-Channel Seller (Channel Reconciliation)": (
+                "Hi [Name],\n\nManaging sales across Amazon, Flipkart, and your own website usually means drowning in different CSV formats and trying to figure out which channel actually generates the highest net margins.\n\n"
+                "I help e-commerce sellers automate their multi-channel sales and reconciliation reporting. I deliver:\n"
+                "1. Normalized, cleaned sales CSVs with standardized columns.\n"
+                "2. A multi-tab Excel model with automatic channel and return summaries.\n"
+                "3. An executive HTML dashboard showing pacing and top metro hubs.\n\n"
+                "Would you be open to seeing a 2-minute sample report built on sample e-commerce data?\n\n"
+                "Best regards,\n[Your Name]"
+            ),
+            "Script C: Retail / Wholesale Merchant (Order Pacing)": (
+                "Hello [Name],\n\nHope you're having a productive week.\n\n"
+                "I work with growing retail businesses to turn weekly sales orders into clear visual dashboards. Instead of static invoices, you get an interactive dashboard showing daily order pacing, payment method mix, and top customer regions—delivered in under 48 hours.\n\n"
+                "Would it be helpful if I shared a sample Excel and dashboard package so you can see how it looks?\n\n"
+                "Regards,\n[Your Name]"
+            ),
+            "Script D: Accounting / Finance Lead (CSV Deduplication & QA)": (
+                "Hi [Name],\n\nCleaning messy customer CSVs, fixing formula errors, and deduplicating customer statements is one of the biggest time-sinks in month-end financial reviews.\n\n"
+                "I run a specialized analytics service that provides sanitized CSV data, formula-checked Excel workbooks, and independent QA verification reports within 48 hours.\n\n"
+                "Happy to share a sample deliverable package if you're exploring ways to streamline your monthly data cleanup.\n\n"
+                "Best,\n[Your Name]"
+            ),
+            "Script E: Warm Network / Referral": (
+                "Hi [Name],\n\nI recently launched a fast-turnaround business analytics service that converts messy sales and transaction data into executive Excel models and interactive dashboards.\n\n"
+                "I'm currently taking on two pilot clients at an introductory rate (₹5,000 ex-GST) to build verified case studies. If [Brand Name] or anyone in your network needs a clean, professional sales dashboard delivered this week, I'd love to help out.\n\n"
+                "Here's a quick link to a sample report: [Link / Attached PDF]\n\n"
+                "Thanks!\n[Your Name]"
+            ),
+        }
+        st.text_area("Personalized Message Template (Customize before sending)", value=scripts_map[sample_script], height=180)
 
     # Section 1: 50/30/5/3 Campaign Progress Metrics
     f_metrics = get_funnel_metrics()
@@ -924,6 +979,15 @@ with tabs[5]:
         st.write("**Job Capacities Needed for Safety Buffer:**")
         st.json(np_plan.safety_buffer_jobs_needed)
 
+        st.markdown("#### 🎯 Illustrative Operating Safety Buffer Portfolio (18 Projects)")
+        sb_model = NetProfitOptimizer.get_safety_buffer_portfolio_model()
+        sb_col1, sb_col2, sb_col3, sb_col4 = st.columns(4)
+        sb_col1.metric("Gross Billings", f"₹{sb_model['monthly_gross_billings_inr']:,.0f}/mo", "18 projects")
+        sb_col2.metric("Pre-Tax Contribution", f"₹{sb_model['monthly_pretax_contribution_inr']:,.0f}/mo")
+        sb_col3.metric("Monthly Tax Provision", f"₹{sb_model['monthly_tax_provision_inr']:,.0f}/mo", "Sec 202 slabs")
+        sb_col4.metric("Post-Tax Net Profit", f"₹{sb_model['monthly_posttax_profit_inr']:,.0f}/mo", "+₹30,312 buffer")
+        st.caption(f"Mix: 9 Analytics (@ ₹5k) + 5 Reconciliation (@ ₹10k) + 4 ETL (@ ₹15k). Delivery effort: ~53 hours/month. Active Tax Accounting Method: **{np_plan.accounting_method.upper()}** (Sec 276).")
+
     # Section 1: Financial Reserves & GST Separation
     st.divider()
     st.markdown("### ⚖️ Tax, GST & Cash Runway Reserves (C = B - G - T - U - W)")
@@ -1060,6 +1124,14 @@ with tabs[5]:
                     index=0 if curr_gst_thresh == 2000000.0 else 1,
                     help="CBIC GST threshold for service providers is ₹20 Lakhs in most states, but ₹10 Lakhs in Special Category states.",
                 )
+                curr_acc_method = str(active_prof.get("accounting_method", "cash")).strip().lower() if active_prof else "cash"
+                acc_method_choice = st.selectbox(
+                    "Tax Accounting Method (Income-tax Act, 2025 Section 276)",
+                    options=["cash", "mercantile"],
+                    format_func=lambda x: "Cash (Income recognized upon actual receipt; default for solo operations)" if x == "cash" else "Mercantile / Accrual (Income recognized when invoices issued)",
+                    index=0 if curr_acc_method == "cash" else 1,
+                    help="Section 276 allows cash or mercantile accounting regularly employed by the business.",
+                )
                 if st.form_submit_button("Update Tax Profile"):
                     upsert_tax_profile(
                         other_annual_income_inr=other_inc,
@@ -1067,6 +1139,7 @@ with tabs[5]:
                         advance_tax_paid_inr=adv_tax,
                         tds_credits_inr=tds_credit,
                         gst_threshold_inr=gst_thresh_choice,
+                        accounting_method=acc_method_choice,
                     )
                     st.success("Tax profile updated!")
                     st.rerun()
@@ -1119,12 +1192,12 @@ with tabs[5]:
                             )
                             chosen_entity_id = invoice_map[selected_invoice_label]
                             tds_input = st.number_input(
-                                "TDS Withheld by Client ₹ (if deducted under Sec 194J/194C)",
+                                "TDS Withheld by Client ₹ (deducted under Section 393 [formerly Section 194J/194C])",
                                 min_value=0.0,
                                 value=0.0,
                                 step=100.0,
                                 key=f"reconcile_tds_{u['id']}",
-                                help="Enter tax deducted by corporate client. Bank credit + TDS must equal invoice total.",
+                                help="Enter tax deducted by corporate client under Section 393. Bank credit + TDS must equal invoice total.",
                             )
                         else:
                             st.warning("No unpaid invoices are available. Choose 'other' or create the correct invoice first.")

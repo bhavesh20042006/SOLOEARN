@@ -24,6 +24,8 @@ GST_SPECIAL_CATEGORY_THRESHOLD_INR = 1000000.0  # Special category states
 SUPPORTED_TAX_YEAR = "2026-27"
 SUPPORTED_TAX_REGIME = "new_2025"
 SUPPORTED_ENTITY_TYPE = "individual_sole_proprietor"
+SUPPORTED_ACCOUNTING_METHODS = {"cash", "mercantile"}  # Income-tax Act, 2025 Section 276
+TDS_STATUTORY_SECTION = "Section 393 (formerly Section 194J/194C)"
 
 
 def validate_tax_profile(profile: dict[str, Any] | None) -> dict[str, str]:
@@ -34,6 +36,7 @@ def validate_tax_profile(profile: dict[str, Any] | None) -> dict[str, str]:
             "residential_status": "resident",
             "tax_year": SUPPORTED_TAX_YEAR,
             "regime": SUPPORTED_TAX_REGIME,
+            "accounting_method": "cash",
         }
     expected = {
         "entity_type": SUPPORTED_ENTITY_TYPE,
@@ -48,7 +51,13 @@ def validate_tax_profile(profile: dict[str, Any] | None) -> dict[str, str]:
                 f"SOLOEARN tax estimates currently support only {key}={supported_value!r}; "
                 f"the saved profile contains {actual!r}. Update the profile or obtain CA review."
             )
-    return expected
+    method = str(profile.get("accounting_method", "cash")).strip().lower()
+    if method not in SUPPORTED_ACCOUNTING_METHODS:
+        raise ValueError(
+            f"Unsupported accounting method {method!r}. Allowed: {SUPPORTED_ACCOUNTING_METHODS} "
+            "(Income-tax Act, 2025 Section 276)."
+        )
+    return {**expected, "accounting_method": method}
 
 # Surcharge thresholds & base benchmarks under Section 202 default regime
 SURCHARGE_THRESHOLDS = [

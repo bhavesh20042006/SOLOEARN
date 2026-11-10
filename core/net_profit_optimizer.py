@@ -126,6 +126,7 @@ class NetProfitPlan:
     monthly_pretax_safety_buffer_required_inr: float = 0.0
     safety_buffer_gap_inr: float = 0.0
     safety_buffer_jobs_needed: dict[str, int] = field(default_factory=dict)
+    accounting_method: str = "cash"
 
 
 class NetProfitOptimizer:
@@ -152,6 +153,40 @@ class NetProfitOptimizer:
             }
             for s in SERVICE_PROFIT_SPECS
         ]
+
+    @classmethod
+    def get_safety_buffer_portfolio_model(cls) -> dict[str, Any]:
+        """
+        Returns the illustrative 18-project internal operating safety-buffer portfolio:
+        - 9 Analytics @ ₹5,000 ex-GST (contribution: ₹4,600 each, effort: 2h)
+        - 5 Reconciliation @ ₹10,000 ex-GST (contribution: ₹9,250 each, effort: 3h)
+        - 4 ETL pipelines @ ₹15,000 ex-GST (contribution: ₹13,750 each, effort: 5h)
+        Produces ₹1,30,312 monthly post-tax profit after ₹12,338 tax provision and 53 delivery hours.
+        """
+        mix = [
+            ("data_analytics", 9, 5000.0, 4600.0, 2.0),
+            ("csv_reconciliation", 5, 10000.0, 9250.0, 3.0),
+            ("data_engineering", 4, 15000.0, 13750.0, 5.0),
+        ]
+        gross_monthly = sum(count * price for _, count, price, _, _ in mix)
+        pretax_monthly = sum(count * contrib for _, count, _, contrib, _ in mix)
+        delivery_hours = sum(count * hrs for _, count, _, _, hrs in mix)
+        annual_pretax = pretax_monthly * 12.0
+        tax_res = compute_income_tax_india_2026(annual_pretax)
+        monthly_tax = round(tax_res["total_tax"] / 12.0, 2)
+        posttax_profit = round(pretax_monthly - monthly_tax, 2)
+        return {
+            "total_projects": 18,
+            "project_mix": {"data_analytics": 9, "csv_reconciliation": 5, "data_engineering": 4},
+            "monthly_gross_billings_inr": gross_monthly,
+            "monthly_pretax_contribution_inr": pretax_monthly,
+            "annual_pretax_inr": annual_pretax,
+            "annual_tax_inr": tax_res["total_tax"],
+            "monthly_tax_provision_inr": monthly_tax,
+            "monthly_posttax_profit_inr": posttax_profit,
+            "monthly_delivery_hours": delivery_hours,
+            "target_achieved": posttax_profit >= MONTHLY_SAFETY_BUFFER_TARGET_INR,
+        }
 
     @classmethod
     def calculate_minimum_profitable_quote(
@@ -438,4 +473,5 @@ class NetProfitOptimizer:
             monthly_pretax_safety_buffer_required_inr=monthly_pretax_buffer_req,
             safety_buffer_gap_inr=buffer_gap,
             safety_buffer_jobs_needed=buffer_needed_by_tier,
+            accounting_method=cash_res.get("accounting_method", "cash"),
         )

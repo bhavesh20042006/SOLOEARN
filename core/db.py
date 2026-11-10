@@ -198,6 +198,7 @@ def init_db() -> None:
                 advance_tax_paid_inr REAL NOT NULL DEFAULT 0.0,
                 tds_credits_inr REAL NOT NULL DEFAULT 0.0,
                 gst_threshold_inr REAL NOT NULL DEFAULT 2000000.0,
+                accounting_method TEXT NOT NULL DEFAULT 'cash',
                 is_active INTEGER NOT NULL DEFAULT 1,
                 created_at TEXT NOT NULL
             );
@@ -285,6 +286,10 @@ def init_db() -> None:
         if "gst_threshold_inr" not in tax_cols:
             conn.execute(
                 "ALTER TABLE tax_profiles ADD COLUMN gst_threshold_inr REAL NOT NULL DEFAULT 2000000.0"
+            )
+        if "accounting_method" not in tax_cols:
+            conn.execute(
+                "ALTER TABLE tax_profiles ADD COLUMN accounting_method TEXT NOT NULL DEFAULT 'cash'"
             )
 
 
@@ -1070,8 +1075,10 @@ def upsert_tax_profile(
     advance_tax_paid_inr: float = 0.0,
     tds_credits_inr: float = 0.0,
     gst_threshold_inr: float = 2000000.0,
+    accounting_method: str = "cash",
 ) -> int:
-    """Inserts or updates the active tax profile."""
+    """Inserts or updates the active tax profile (supporting Section 276 cash vs mercantile accounting)."""
+    acc_method = "mercantile" if str(accounting_method).strip().lower() == "mercantile" else "cash"
     with connect() as conn:
         conn.execute("UPDATE tax_profiles SET is_active = 0 WHERE is_active = 1")
         cur = conn.execute(
@@ -1079,8 +1086,8 @@ def upsert_tax_profile(
                 profile_name, entity_type, residential_status, tax_year, regime,
                 other_annual_income_inr, other_pan_aggregate_turnover_inr,
                 advance_tax_paid_inr, tds_credits_inr, gst_threshold_inr,
-                is_active, created_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?)""",
+                accounting_method, is_active, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?)""",
             (
                 profile_name[:100],
                 entity_type[:50],
@@ -1092,6 +1099,7 @@ def upsert_tax_profile(
                 max(0.0, float(advance_tax_paid_inr)),
                 max(0.0, float(tds_credits_inr)),
                 max(100000.0, float(gst_threshold_inr)),
+                acc_method,
                 utc_now(),
             ),
         )

@@ -596,7 +596,7 @@ def reconcile_statement_row(
     outstanding invoice/expense amount, and duplicate references.
 
     Supports exact invoice settlement via bank cash alone or bank cash plus verified
-    client TDS withheld (Section 194J/194C):
+    client TDS withheld (Income-tax Act, 2025 Section 393, formerly Section 194J/194C):
       Bank Credit + TDS Withheld == Invoice Gross Total
 
     Partial settlements without verified TDS or overpayments are rejected.
@@ -906,8 +906,30 @@ def get_cash_and_reserves_summary(
             total_operating_expenses = exp_summary["total_expenses_inr"]
             deductible_operating_expenses = exp_summary["deductible_expenses_inr"]
 
-        operating_profit = round(collected_receipts - total_operating_expenses, 2)
-        taxable_business_profit = max(0.0, round(collected_receipts - deductible_operating_expenses, 2))
+        # Method of accounting under Income-tax Act, 2025 Section 276 (cash vs mercantile)
+        tax_prof = get_active_tax_profile()
+        tax_settings = validate_tax_profile(tax_prof)
+        acc_method = tax_settings.get("accounting_method", "cash")
+
+        if acc_method == "mercantile":
+            # Accrual basis: recognize invoiced revenue ex-GST
+            if eff_month and eff_month != "all":
+                inv_row = conn.execute(
+                    """SELECT COALESCE(SUM(amount_subtotal), 0) FROM invoices
+                       WHERE status <> 'cancelled' AND substr(issued_at, 1, 7) = ?""",
+                    (eff_month,),
+                ).fetchone()
+            else:
+                inv_row = conn.execute(
+                    "SELECT COALESCE(SUM(amount_subtotal), 0) FROM invoices WHERE status <> 'cancelled'"
+                ).fetchone()
+            mercantile_turnover = float(inv_row[0] if inv_row else 0.0)
+            operating_profit = round(mercantile_turnover - total_operating_expenses, 2)
+            taxable_business_profit = max(0.0, round(mercantile_turnover - deductible_operating_expenses, 2))
+        else:
+            # Cash basis: recognize revenue upon actual collection of client receipts
+            operating_profit = round(collected_receipts - total_operating_expenses, 2)
+            taxable_business_profit = max(0.0, round(collected_receipts - deductible_operating_expenses, 2))
 
         # Lifetime / All ledger transactions for bank cash & reserves
         txs = conn.execute("SELECT tx_type, SUM(amount_inr) as total_inr FROM financial_transactions GROUP BY tx_type").fetchall()
@@ -1004,4 +1026,5 @@ def get_cash_and_reserves_summary(
         "working_capital_buffer_inr": buffer_reserve,
         "distributable_cash_inr": distributable_cash,
         "is_solvent": is_solvent,
+        "accounting_method": acc_method,
     }

@@ -1,67 +1,69 @@
-# SOLOEARN Unit Economics & Net Profit Progression Model (M6.2)
+# SOLOEARN Unit Economics & Net Profit Progression Model (M6.3)
 
-To achieve the North Star objective of **₹1,00,000 per month in net owner profit**, every customer engagement must be evaluated using post-tax unit economics and aggregate annual tax modeling rather than speculative top-line revenue or misleading static per-project tax percentages.
+To achieve the North Star objective of **₹1,00,000 per month in net owner profit** with an internal **₹1,25,000 / month operating safety buffer**, every customer engagement must be evaluated using post-tax unit economics, ex-GST base pricing, and aggregate annual tax modeling under the **Income-tax Act, 2025**.
 
 ---
 
-## 1. Unit Economics by Service Package
+## 1. Unit Economics by Service Package (Strictly Ex-GST)
 
-Under the Income-tax Act, 2025 (Section 202 slabs and Section 156 rebate for resident sole proprietors), income tax is **not** a flat per-project deduction. It is determined on total aggregate annual income. 
+All package prices are **quoted excluding GST**. If the business is registered under GST, statutory tax (18%) is charged on top of these base quotes and held in the statutory GST liability reserve. **GST is never counted as business revenue.**
+
+Under the Income-tax Act, 2025 (Section 202 slabs and Section 156 rebate for resident sole proprietors), income tax is **not** a flat per-project deduction. It is determined on total aggregate annual business income.
 
 The baseline pre-tax contribution margin is:
-$$\text{Pre-Tax Contribution} = \text{Target Price} - \text{Platform Fee (5\%)} - \text{Direct Compute/Storage Cost}$$
+$$\text{Pre-Tax Contribution} = \text{Target Price (ex-GST)} - \text{Platform Fee (5\%)} - \text{Direct Compute/Storage Cost}$$
 
-### Tier 1: Business Analytics & Excel Pack (Initial Product)
-- **Gross Client Price:** **₹5,000**
+### Tier 1: Business Analytics & Excel Pack (Initial Pilot Offering)
+- **Base Client Price (ex-GST):** **₹5,000**
 - **Payment Gateway / Platform Fee (5%):** -₹250
 - **Direct Workspace / Compute Costs:** -₹150
 - **Pre-Tax Contribution Margin:** **₹4,600** (92.0% gross margin)
 - **Estimated Net Post-Tax Yield:**
   - *At 0% effective tax (annual taxable income $\le$ ₹12,00,000):* **₹4,600**
   - *At ~5.75% effective tax (at ₹12.74L scale):* **₹4,336**
-  - *At ~8.05% effective tax (at ₹16.31L buffer scale):* **₹4,230**
+  - *At ~8.65% effective tax (at ₹17.12L / 18-job safety buffer scale):* **₹4,202**
 - **Estimated Delivery Effort:** ~2.0 hours
 - **Pre-Tax Hourly Return:** **₹2,300 / hour**
 
 ### Tier 2: CSV Reconciliation Automation
-- **Gross Client Price:** **₹10,000**
+- **Base Client Price (ex-GST):** **₹10,000**
 - **Payment Gateway / Platform Fee (5%):** -₹500
 - **Direct Costs:** -₹250
 - **Pre-Tax Contribution Margin:** **₹9,250** (92.5% gross margin)
 - **Estimated Net Post-Tax Yield:**
   - *At 0% effective tax:* **₹9,250**
   - *At ~5.75% effective tax:* **₹8,718**
-  - *At ~8.05% effective tax:* **₹8,505**
+  - *At ~8.65% effective tax:* **₹8,450**
 - **Estimated Delivery Effort:** ~3.0 hours
 - **Pre-Tax Hourly Return:** **₹3,083 / hour**
 
 ### Tier 3: Data Engineering ETL Pipeline
-- **Gross Client Price:** **₹15,000**
+- **Base Client Price (ex-GST):** **₹15,000**
 - **Payment Gateway / Platform Fee (5%):** -₹750
 - **Direct Costs:** -₹500
 - **Pre-Tax Contribution Margin:** **₹13,750** (91.7% gross margin)
 - **Estimated Net Post-Tax Yield:**
   - *At 0% effective tax:* **₹13,750**
   - *At ~5.75% effective tax:* **₹12,959**
-  - *At ~8.05% effective tax:* **₹12,643**
+  - *At ~8.65% effective tax:* **₹12,561**
 - **Estimated Delivery Effort:** ~5.0 hours
 - **Pre-Tax Hourly Return:** **₹2,750 / hour**
 
 ### Tier 4: Executive Interactive HTML5 Dashboard
-- **Gross Client Price:** **₹20,000**
+- **Base Client Price (ex-GST):** **₹20,000**
 - **Payment Gateway / Platform Fee (5%):** -₹1,000
 - **Direct Costs:** -₹600
 - **Pre-Tax Contribution Margin:** **₹18,400** (92.0% gross margin)
 - **Estimated Net Post-Tax Yield:**
   - *At 0% effective tax:* **₹18,400**
   - *At ~5.75% effective tax:* **₹17,342**
-  - *At ~8.05% effective tax:* **₹16,919**
+  - *At ~8.65% effective tax:* **₹16,808**
 - **Estimated Delivery Effort:** ~6.0 hours
 - **Pre-Tax Hourly Return:** **₹3,067 / hour**
 
 ---
 
-## 2. Mathematical Audit of Portfolio Models
+## 2. Portfolio Mathematics: 13-Job Shortfall vs 14-Job Model
 
 ### A. The 13-Job Portfolio (Disproven / Shortfall Detected)
 Previously, a combination of **6 Analytics + 4 Reconciliation + 3 ETL** was claimed to generate ₹1,00,000 net profit.
@@ -77,10 +79,9 @@ An exact audit reveals this is incorrect:
   - **Monthly Tax Provision:** **₹6,084**
 - **Monthly Post-Tax Net Profit:** $₹1,05,850 - ₹6,084 =$ **₹99,766.00**
 - **Result:** **Target missed by ₹234 / month.**
-*(Note: If evaluated under arbitrary flat per-tier allocations, the reported yield was only ₹95,100, a ₹4,900 shortfall).*
 
 ### B. The 14-Job Portfolio (Minimum Viable Model)
-To reliably reach ₹1,00,000 post-tax without unallocated overhead:
+To reach ₹1,00,000 post-tax without unallocated overhead:
 - **Mix:** **7 Analytics + 4 Reconciliation + 3 ETL** (14 projects)
 - **Gross Billing:** ₹1,20,000
 - **Pre-Tax Contribution:** $7 \times ₹4,600 + 4 \times ₹9,250 + 3 \times ₹13,750 = ₹1,10,450$
@@ -90,63 +91,106 @@ To reliably reach ₹1,00,000 post-tax without unallocated overhead:
 - **Cushion:** **+₹3,619.80 / month**
 
 > [!WARNING]
-> **Overhead & Acquisition Sensitivity:**
-> If fixed unallocated operating expenses (e.g. cloud tools, subscriptions, workstation power) exceed **₹3,620 / month**, or if client acquisition costs (CAC) are incurred, even the 14-job portfolio will fall below the ₹1,00,000 threshold.
+> If fixed unallocated operating expenses exceed **₹3,620 / month**, or if client acquisition costs (CAC) are incurred, even the 14-job portfolio drops below the ₹1,00,000 threshold.
 
 ---
 
-## 3. The ₹1,25,000 Monthly Safety Buffer Target
+## 3. The 18-Project Safety Buffer Operating Target (₹1.25 Lakh / Month)
 
-To prevent inevitable real-world friction (revisions, delayed payments, platform chargebacks, software subscriptions) from dropping take-home profit below ₹1,00,000, SOLOEARN models an internal **₹1,25,000 / month post-tax safety buffer target** (₹15,00,000 annual net profit):
+Rather than designing SOLOEARN around exactly ₹1,00,000, SOLOEARN uses **₹1,25,000 / month post-tax as its internal operating target** to absorb real-world friction (software subscriptions, delays, revisions).
 
-| Parameter | Statutory Calculation |
+### Illustrative Safety-Buffer Portfolio (18 projects / month)
+
+| Service Tier | Monthly Projects | Unit Price (ex-GST) | Gross Billings | Unit Pre-Tax Contribution | Total Pre-Tax Contribution | Delivery Hours |
+|---|---|---|---|---|---|---|
+| **Tier 1: Analytics** | 9 | ₹5,000 | ₹45,000 | ₹4,600 | ₹41,400 | 18 hrs (2h each) |
+| **Tier 2: Reconciliation** | 5 | ₹10,000 | ₹50,000 | ₹9,250 | ₹46,250 | 15 hrs (3h each) |
+| **Tier 3: ETL Pipelines** | 4 | ₹15,000 | ₹60,000 | ₹13,750 | ₹55,000 | 20 hrs (5h each) |
+| **Total** | **18 projects** | — | **₹1,55,000** | — | **₹1,42,650** | **53 hours / month** |
+
+### Tax & Take-Home Profit Breakdown
+
+| Parameter | Statutory Amount (FY 2026–27) |
 |---|---|
-| **Target Post-Tax Profit** | **₹1,25,000 / month** (₹15,00,000 / year) |
-| **Required Pre-Tax Business Profit** | **₹16,31,313.12 / year** (**₹1,35,942.76 / month**) |
-| **Statutory Income Tax Liability** | **₹1,31,313.12 / year** (**₹10,942.76 / month**) |
-| **Effective Tax Rate** | **8.05%** |
-| **Required Tier 1 Jobs (@ ₹4,600 pre-tax)** | **30 jobs / month** |
-| **Balanced Portfolio Needed** | **9 Analytics + 5 Reconciliation + 4 ETL** (18 jobs) |
+| **Monthly Gross Billings** | **₹1,55,000** |
+| **Monthly Pre-Tax Contribution** | **₹1,42,650** |
+| **Annualized Pre-Tax Profit** | **₹17,11,800** |
+| **Section 202 Slab Tax** | ₹1,42,360.00 |
+| **Section 156 Rebate / Relief** | ₹0.00 (above ₹12.71L threshold) |
+| **4% Health & Education Cess** | ₹5,694.40 |
+| **Total Annual Income Tax** | **₹1,48,054.40** |
+| **Monthly Tax Provision** | **₹12,337.87** (~**₹12,338**) |
+| **Monthly Post-Tax Net Profit** | **₹1,30,312.13** (~**₹1,30,312**) |
+| **Safety Margin Above ₹1 Lakh** | **+₹30,312 / month** |
+| **Delivery Labor Required** | **~53 hours / month** (~13 hrs / week) |
 
 ---
 
-## 4. Owner Time Tracking & Total Operational Labor
+## 4. Method of Accounting: Cash vs Mercantile (Section 276)
 
-Delivery time is only one component of a solo business. SOLOEARN tracks owner labor across **5 operational categories**:
+Under **Section 276 of the Income-tax Act, 2025**, business income must be computed in accordance with either the **cash** or **mercantile** method regularly employed:
 
+1. **Cash Method (Default for Lean Solo Operations):**
+   - Revenue is recognized strictly upon **actual collection of client receipts** in the bank account.
+   - Expenses are recognized when **actually paid**.
+   - Invoiced amounts not yet deposited do not trigger taxable profit or tax reserves.
+2. **Mercantile Method (Accrual Accounting):**
+   - Revenue is recognized when **invoices are issued** (right to receive arises), regardless of payment timing.
+   - Expenses are recognized when **incurred / billed by vendors**.
+   - Unpaid customer invoices count toward annual business taxable turnover.
+
+SOLOEARN supports both modes via `tax_profiles.accounting_method`.
+
+---
+
+## 5. Tax Deducted at Source (TDS) under Section 393
+
+Under the Income-tax Act, 2025, **Section 393** (and its applicable table items) governs Tax Deducted at Source for contracts and professional/technical fees (superseding legacy Sections 194J and 194C):
+- When corporate clients deduct TDS (typically 10% under Section 393 for technical services or 1-2% for contracts), bank credit will equal:
+  $$\text{Bank Credit} = \text{Invoice Gross Total} - \text{TDS Withheld (Section 393)}$$
+- SOLOEARN reconciles the deposit by matching $\text{Bank Credit} + \text{TDS Withheld} == \text{Invoice Total}$.
+- The TDS withheld is credited to `tax_profiles.tds_credits_inr` and directly reduces remaining annual income tax liability without double-counting.
+
+---
+
+## 6. Customer Acquisition: Funnel Conversion Sensitivity
+
+The initial **50/30/5/3 Campaign** target (50 prospects identified $\rightarrow$ 30 personalized approaches $\rightarrow$ 5 serious conversations $\rightarrow$ 3 paid pilot clients) implies a **60% close rate from conversations**. 
+
+This 60% conversion rate is an **unproven initial design target**. Real-world conversion benchmarks require sensitivity analysis:
+
+| Funnel Metric | Conservative Case (Cold Outreach) | Moderate Case (Warm / Niche Outreach) | Initial Design Target (Stretch) |
+|---|---|---|---|
+| **Approach $\rightarrow$ Conversation Rate** | 8% | 15% | 16.7% |
+| **Conversation $\rightarrow$ Paid Pilot Close Rate** | **15%** | **30%** | **60%** |
+| **Paid Pilots Desired** | 3 | 3 | 3 |
+| **Serious Conversations Needed** | **20 conversations** | **10 conversations** | **5 conversations** |
+| **Personalized Approaches Needed** | **~250 approaches** | **~65 approaches** | **30 approaches** |
+| **Total Prospecting Labor** | ~35 hours | ~12 hours | ~6 hours |
+
+> [!NOTE]
+> Milestone 6.3 executes an initial **5-prospect commercial experiment** on genuine small e-commerce sellers to establish actual baseline conversion rates before projecting full portfolio economics.
+
+---
+
+## 7. Owner Labor Categories & 6 Financial Lifecycle States
+
+### Operational Labor (5 Categories)
 ```mermaid
 flowchart TD
-    O["Total Owner Time (~25-30 hrs/week)"] --> D["1. Delivery (~12-15 hrs/wk)<br>Scripting, analysis, reporting"]
-    O --> P["2. Prospecting (~5-8 hrs/wk)<br>Lead scanning, proposal drafting"]
-    O --> C["3. Client Communication (~3-4 hrs/wk)<br>Scoping, intake, status calls"]
-    O --> R["4. Revisions & QA (~2-3 hrs/wk)<br>Client diffs, corrections"]
-    O --> A["5. Administration (~2 hrs/wk)<br>Invoicing, reconciliation, tax prep"]
+    O["Total Owner Operational Effort"] --> D["1. Delivery (~53 hrs/mo for 18 jobs)<br>Scripting, analysis, reporting"]
+    O --> P["2. Prospecting (~15-20 hrs/mo)<br>Lead scanning, personalized approaches"]
+    O --> C["3. Client Communication (~8-10 hrs/mo)<br>Scoping calls, clarification, updates"]
+    O --> R["4. Revisions & QA (~6-8 hrs/mo)<br>Client corrections, regression runs"]
+    O --> A["5. Administration (~4 hrs/mo)<br>Invoicing, reconciliation, tax prep"]
 ```
 
-1. **Delivery:** Time spent executing pipelines, producing Excel workbooks, and creating HTML dashboards.
-2. **Prospecting:** Reviewing opportunity boards, customizing proposals, and validating requirements.
-3. **Client Communication:** Initial qualification, intake clarifications, and progress updates.
-4. **Revisions:** Addressing customer feedback, modifying deliverables, and running regression checks.
-5. **Administration:** Reconciling bank statements, tracking expenses, filing taxes, and managing system infrastructure.
-
----
-
-## 5. Distinct Financial States
-
-To prevent misleading revenue projections, SOLOEARN strictly separates financial lifecycle states:
-
+### 6 Financial Lifecycle States
 ```mermaid
 flowchart LR
     E["1. Estimated<br>(Pipeline)"] --> C["2. Contracted<br>(Accepted Quote)"]
-    C --> I["3. Invoiced<br>(Payment Pending)"]
-    I --> K["4. Cash Collected<br>(Bank Credit)"]
-    I --> T["5. TDS Receivable<br>(Client Withholding)"]
+    C --> I["3. Invoiced<br>(Pending Payment)"]
+    I --> K["4. Cash Collected<br>(Bank Deposit)"]
+    I --> T["5. TDS Receivable<br>(Sec 393 Credit)"]
     K --> R["6. Reconciled & Settled<br>(Distributable Cash)"]
 ```
-
-1. **Estimated Pipeline:** Unconfirmed opportunities and initial quotes.
-2. **Contracted Pipeline:** Work authorized by client, awaiting delivery and invoicing.
-3. **Invoiced (Receivables):** Deliverables completed and invoice sent; pending payment.
-4. **Cash Collected:** Actual bank credits received; gross cash.
-5. **TDS Receivable:** Tax deducted at source by corporate clients (e.g. 10% under Section 194J) that offsets annual income tax liability.
-6. **Reconciled & Distributable:** Transactions confirmed against bank statements, minus GST collected and statutory tax reserves.

@@ -74,7 +74,7 @@ class FinancialAccuracyAuditTests(unittest.TestCase):
         return opp_id
 
     def test_invoice_reconciliation_with_client_tds_withheld(self):
-        """Tests that client TDS deduction (e.g. 10% under Sec 194J) is reconciled properly."""
+        """Tests that client TDS deduction (e.g. 10% under Section 393, formerly Section 194J/194C) is reconciled properly."""
         opp_id = self._create_opp("Client Corp Pipeline", 10000.0, status="submitted_by_owner")
         task_id = create_task("ETL Pipeline Delivery", "data_engineering", "ws_tds", opp_id)
         with connect() as conn:
@@ -310,6 +310,58 @@ class FinancialAccuracyAuditTests(unittest.TestCase):
         self.assertEqual(f_summary["estimated_pipeline_inr"], 8000.0)
         self.assertEqual(f_summary["contracted_pipeline_inr"], 12000.0)
         self.assertEqual(f_summary["invoiced_pending_inr"], 15000.0)
+
+    def test_accounting_method_cash_vs_mercantile_section_276(self):
+        """Tests Section 276 cash vs mercantile (accrual) accounting method."""
+        # 1. Under Cash Method (Default): Unpaid invoice is not taxable yet
+        upsert_tax_profile(accounting_method="cash")
+        opp_id = self._create_opp("Lead Accrual", 20000.0, status="submitted_by_owner")
+        t_id = create_task("Dashboard", "interactive_dashboard", "ws_accrual", opp_id)
+        with connect() as conn:
+            conn.execute("UPDATE tasks SET status='submission_ready', artifact_path='deliverables.zip' WHERE id=?", (t_id,))
+            conn.execute("UPDATE opportunities SET status='submitted_by_owner' WHERE id=?", (opp_id,))
+        create_invoice(opp_id, client_name="Corp Client", service_tier="interactive_dashboard", amount_subtotal=20000.0, tax_rate=0.0)
+
+        cash_summary = get_cash_and_reserves_summary()
+        self.assertEqual(cash_summary["accounting_method"], "cash")
+        self.assertEqual(cash_summary["collected_receipts_inr"], 0.0)
+        self.assertEqual(cash_summary["taxable_business_profit_inr"], 0.0)
+
+        # 2. Switch to Mercantile Method: Invoiced amount becomes taxable turnover upon issuance
+        upsert_tax_profile(accounting_method="mercantile")
+        merc_summary = get_cash_and_reserves_summary()
+        self.assertEqual(merc_summary["accounting_method"], "mercantile")
+        self.assertEqual(merc_summary["taxable_business_profit_inr"], 20000.0)
+
+    def test_eighteen_project_safety_buffer_portfolio(self):
+        """
+        Validates the illustrative 18-project internal operating safety-buffer portfolio:
+        9 Analytics + 5 Reconciliation + 4 ETL = 18 projects.
+        Gross: ₹1,55,000 | Pre-Tax: ₹1,42,650 | Tax: ₹12,338 | Post-Tax: ₹1,30,312 | Effort: 53 hours.
+        """
+        model = NetProfitOptimizer.get_safety_buffer_portfolio_model()
+        self.assertEqual(model["total_projects"], 18)
+        self.assertEqual(model["monthly_gross_billings_inr"], 155000.0)
+        self.assertEqual(model["monthly_pretax_contribution_inr"], 142650.0)
+        self.assertEqual(model["annual_pretax_inr"], 1711800.0)
+        self.assertAlmostEqual(model["monthly_tax_provision_inr"], 12337.87, delta=1.0)
+        self.assertAlmostEqual(model["monthly_posttax_profit_inr"], 130312.13, delta=1.0)
+        self.assertEqual(model["monthly_delivery_hours"], 53.0)
+        self.assertTrue(model["target_achieved"])
+        self.assertGreater(model["monthly_posttax_profit_inr"], MONTHLY_SAFETY_BUFFER_TARGET_INR)
+
+    def test_catalog_pricing_strictly_ex_gst(self):
+        """Verifies that all standard catalog service quotes are strictly ex-GST base prices."""
+        expected_prices = {
+            "data_analytics": 5000.0,
+            "csv_reconciliation": 10000.0,
+            "data_engineering": 15000.0,
+            "interactive_dashboard": 20000.0,
+        }
+        for s in SERVICE_PROFIT_SPECS:
+            self.assertIn(s.tier_id, expected_prices)
+            self.assertEqual(s.target_price_inr, expected_prices[s.tier_id])
+            self.assertGreater(s.contribution_margin_pct, 50.0)
 
 
 if __name__ == "__main__":

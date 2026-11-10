@@ -4,6 +4,9 @@ from pathlib import Path
 
 root = Path(r"C:\Users\BHAVESH KHULLAR\Downloads\SOLOEARN_v0.1\SOLOEARN")
 out_zips = [
+    Path(r"C:\Users\BHAVESH KHULLAR\Desktop\SOLOEARN_Milestone6.3_Ready.zip"),
+    Path(r"C:\Users\BHAVESH KHULLAR\Downloads\SOLOEARN_Milestone6.3_Ready.zip"),
+    Path(r"C:\Users\BHAVESH KHULLAR\Downloads\SOLOEARN_v0.1\SOLOEARN_Milestone6.3_Ready.zip"),
     Path(r"C:\Users\BHAVESH KHULLAR\Desktop\SOLOEARN_Milestone6.2_Ready.zip"),
     Path(r"C:\Users\BHAVESH KHULLAR\Downloads\SOLOEARN_Milestone6.2_Ready.zip"),
     Path(r"C:\Users\BHAVESH KHULLAR\Downloads\SOLOEARN_v0.1\SOLOEARN_Milestone6.2_Ready.zip"),
