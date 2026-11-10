@@ -5,6 +5,7 @@ __pycache__/
 .streamlit/
 data/*.db*
 data/*.sqlite3*
+data/backups/
 workspaces/*
 !workspaces/.gitkeep
 data/invoices/*

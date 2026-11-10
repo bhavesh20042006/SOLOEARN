@@ -13,6 +13,7 @@ from core.autonomous_worker import run_autonomous_job
 from core.commercial_funnel import (
     add_commercial_lead,
     calculate_project_unit_economics,
+    get_commercial_performance_dashboard,
     get_funnel_metrics,
     init_commercial_tables,
     list_commercial_leads,
@@ -244,7 +245,35 @@ with tabs[1]:
         }
         st.text_area("Personalized Message Template (Customize before sending)", value=scripts_map[sample_script], height=180)
 
-    # Section 1: 50/30/5/3 Campaign Progress Metrics
+    # Section 1: Commercial Performance Dashboard (7 Core Metrics)
+    st.markdown("### 📊 Commercial Performance Dashboard")
+    st.caption("Distinguishes genuine acquisition activity, confirmed work, cash collected, and net take-home earnings. Never counts an interested customer or unpaid invoice as profit.")
+
+    cp_dash = get_commercial_performance_dashboard()
+    d1, d2, d3, d4 = st.columns(4)
+    d1.metric("1. Qualified Leads", cp_dash["qualified_leads"], "Genuine potential clients")
+    d2.metric("2. Proposals Sent", cp_dash["proposals_sent"], "Actual acquisition activity")
+    d3.metric("3. Contracts Won", cp_dash["contracts_won"], "Confirmed customer work")
+    d4.metric("4. Payments Collected", f"₹{cp_dash['payments_collected_inr']:,.2f}", "Actual bank cash received (ex-GST)")
+
+    d5, d6, d7, d8 = st.columns(4)
+    d5.metric("5. Project Contribution", f"₹{cp_dash['project_contribution_inr']:,.2f}", "Revenue after direct costs")
+    d6.metric("6. Net Profit After Tax", f"₹{cp_dash['net_profit_after_tax_inr']:,.2f}", "Real take-home earnings")
+    d7.metric("7. Owner Hours Invested", f"{cp_dash['owner_hours']} hrs", "Across 5 labor categories")
+    d8.metric("M6.4 First Paid Goal", "₹5,000", "First paid pilot goal")
+
+    with st.expander("🎯 Milestone 6.4: Commercial Validation Targets"):
+        st.markdown(
+            "The objective of Milestone 6.4 is to prove that SOLOEARN can repeatedly earn money in the real market:\n"
+            f"- **5 genuine prospective businesses** (Current: {cp_dash['m64_validation_targets']['prospective_businesses_current']} / 5)\n"
+            f"- **3 serious conversations** (Current: {cp_dash['m64_validation_targets']['serious_conversations_current']} / 3)\n"
+            f"- **First paid customer** (Current: {'✅ Achieved' if cp_dash['m64_validation_targets']['first_paid_customer_current'] else 'Pending'})\n"
+            f"- **3 completed paid pilots** (Current: {cp_dash['m64_validation_targets']['completed_paid_pilots_current']} / 3)\n"
+            f"- **At least 2 repeat customers** (Current: {cp_dash['m64_validation_targets']['repeat_customers_current']} / 2)\n"
+            "- **Verified project-level profit and delivery time tracking**\n"
+        )
+
+    # 50/30/5/3 Campaign Progress Metrics
     f_metrics = get_funnel_metrics()
     c1, c2, c3, c4 = st.columns(4)
     with c1:

@@ -252,3 +252,66 @@ def calculate_project_unit_economics(
         "estimated_hours": estimated_hours,
         "hourly_yield_inr": hourly_yield_inr,
     }
+
+
+def get_commercial_performance_dashboard() -> dict[str, Any]:
+    """
+    Distinguishes the 7 exact commercial performance metrics:
+    1. Qualified leads (genuine potential customers)
+    2. Proposals sent (actual acquisition activity)
+    3. Contracts won (confirmed work)
+    4. Payments collected (actual cash received, ex-GST)
+    5. Project contribution (revenue after direct costs & platform fees)
+    6. Net profit after tax (real take-home earnings)
+    7. Owner hours (how much operational time invested)
+    Never counts an interested customer or unpaid invoice as profit.
+    """
+    from core.db import get_financial_states_summary, get_owner_time_summary
+    from core.financial_ledger import get_cash_and_reserves_summary
+
+    f_metrics = get_funnel_metrics()
+    f_states = get_financial_states_summary()
+    cash_info = get_cash_and_reserves_summary()
+    time_summary = get_owner_time_summary()
+
+    with connect() as conn:
+        row_props = conn.execute("SELECT COUNT(*) FROM proposals WHERE is_authorized = 1").fetchone()
+        proposals_sent = int(row_props[0] if row_props else 0)
+
+        row_won = conn.execute(
+            "SELECT COUNT(*) FROM opportunities WHERE status IN ('approved_for_work', 'submitted_by_owner', 'won', 'paid')"
+        ).fetchone()
+        contracts_won = int(row_won[0] if row_won else 0)
+
+        row_repeat = conn.execute(
+            """SELECT client_name, COUNT(*) as cnt FROM invoices
+               WHERE status = 'paid' GROUP BY client_name HAVING cnt >= 2"""
+        ).fetchall()
+        repeat_customers_count = len(row_repeat)
+
+    payments_collected = cash_info["collected_receipts_inr"]
+    operating_profit = cash_info["operating_profit_inr"]
+    net_profit = round(operating_profit - cash_info["monthly_tax_provision_inr"], 2)
+
+    return {
+        "qualified_leads": f_metrics["identified_count"],
+        "proposals_sent": max(proposals_sent, f_metrics["approached_count"]),
+        "contracts_won": contracts_won,
+        "payments_collected_inr": payments_collected,
+        "project_contribution_inr": operating_profit,
+        "net_profit_after_tax_inr": net_profit,
+        "owner_hours": time_summary["total_hours"],
+        "m64_validation_targets": {
+            "prospective_businesses_target": 5,
+            "prospective_businesses_current": f_metrics["identified_count"],
+            "serious_conversations_target": 3,
+            "serious_conversations_current": f_metrics["in_conversation_count"],
+            "first_paid_customer_target": 1,
+            "first_paid_customer_current": 1 if f_metrics["paid_pilot_count"] >= 1 else 0,
+            "completed_paid_pilots_target": 3,
+            "completed_paid_pilots_current": f_metrics["paid_pilot_count"],
+            "repeat_customers_target": 2,
+            "repeat_customers_current": repeat_customers_count,
+            "verified_project_economics": payments_collected > 0,
+        },
+    }
