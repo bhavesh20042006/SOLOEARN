@@ -141,10 +141,33 @@ class CommercialReadinessTests(unittest.TestCase):
         )
 
         self.assertEqual(len(REAL_SMB_PILOT_TARGETS), 5)
+
+        strategic = [t for t in REAL_SMB_PILOT_TARGETS if t["account_classification"] == "Strategic Account"]
+        pilot = [t for t in REAL_SMB_PILOT_TARGETS if t["account_classification"] == "Initial Pilot Prospect"]
+        self.assertEqual(len(strategic), 3)  # Snitch, Blue Tokai, Mokobara
+        self.assertEqual(len(pilot), 2)  # Slurrp Farm, Koparo Clean
+
+        # Verify verified co-founders, unverified pain point hypothesis, and question-led pitches
+        for target in REAL_SMB_PILOT_TARGETS:
+            self.assertIn("verified_founders", target)
+            self.assertTrue(len(target["verified_founders"]) > 5)
+            self.assertFalse(target["is_pain_point_verified"])
+            self.assertEqual(
+                target["hypothesis_label"],
+                "Unverified Prospecting Hypothesis — Pending Discovery Conversation",
+            )
+            self.assertIn("Quick question:", target["custom_pitch"])
+            self.assertIn("Would you", target["custom_pitch"])
+
         added = seed_real_smb_pilot_leads()
         self.assertEqual(added, 5)
         leads = list_commercial_leads()
         self.assertEqual(len(leads), 5)
+
+        # All 5 seeded as prospective_account
+        for l in leads:
+            self.assertEqual(l["stage"], "prospective_account")
+            self.assertIn("Unverified Prospecting Hypothesis", l["notes"])
 
         # Idempotent re-seed
         added_again = seed_real_smb_pilot_leads()
@@ -155,6 +178,66 @@ class CommercialReadinessTests(unittest.TestCase):
         self.assertEqual(len(milestones), 6)
         self.assertFalse(milestones[0]["achieved"])
         self.assertEqual(milestones[0]["milestone"], "1. First Customer")
+
+    def test_section_393_statutory_tds_table_6_rates(self):
+        from core.tax_engine import SECTION_393_TDS_SCHEDULE, calculate_section_393_tds
+
+        # Statutory Table 6 verification:
+        # Table 6(i): Payee is Resident Individual/HUF -> 2%
+        self.assertEqual(SECTION_393_TDS_SCHEDULE["contractor_individual_payee_2"]["rate"], 0.02)
+        self.assertEqual(SECTION_393_TDS_SCHEDULE["contractor_individual_payee_2"]["payee_type"], "individual_or_huf")
+
+        # Table 6(i): Payee is other than Individual/HUF (Company/LLP/Firm) -> 1%
+        self.assertEqual(SECTION_393_TDS_SCHEDULE["contractor_other_payee_1"]["rate"], 0.01)
+        self.assertEqual(SECTION_393_TDS_SCHEDULE["contractor_other_payee_1"]["payee_type"], "other_than_individual")
+
+        # Table 6(iii): Professional services -> 10%
+        self.assertEqual(SECTION_393_TDS_SCHEDULE["professional_services_10"]["rate"], 0.10)
+
+        # Technical services -> 2%
+        self.assertEqual(SECTION_393_TDS_SCHEDULE["technical_services_2"]["rate"], 0.02)
+
+        # Nil / Sub-threshold -> 0%
+        self.assertEqual(SECTION_393_TDS_SCHEDULE["no_tds_0"]["rate"], 0.0)
+
+        # Exact deduction math
+        inv_subtotal = 50000.0
+        self.assertEqual(calculate_section_393_tds(inv_subtotal, "contractor_individual_payee_2"), 1000.0)
+        self.assertEqual(calculate_section_393_tds(inv_subtotal, "contractor_other_payee_1"), 500.0)
+        self.assertEqual(calculate_section_393_tds(inv_subtotal, "professional_services_10"), 5000.0)
+        self.assertEqual(calculate_section_393_tds(inv_subtotal, "technical_services_2"), 1000.0)
+        self.assertEqual(calculate_section_393_tds(inv_subtotal, "no_tds_0"), 0.0)
+
+        with self.assertRaises(ValueError):
+            calculate_section_393_tds(inv_subtotal, "invalid_category")
+
+    def test_prospective_vs_qualified_leads_distinction(self):
+        from core.commercial_funnel import get_commercial_performance_dashboard
+
+        # Seed prospective account
+        add_commercial_lead(
+            company_name="Prospective SMB",
+            contact_name="Co-Founder",
+            stage="prospective_account",
+            proposed_price_inr=5000.0,
+        )
+        # Seed qualified lead
+        add_commercial_lead(
+            company_name="Qualified Client",
+            contact_name="CEO",
+            stage="qualified_lead",
+            proposed_price_inr=10000.0,
+        )
+
+        f_metrics = get_funnel_metrics()
+        self.assertEqual(f_metrics["prospective_count"], 1)
+        self.assertEqual(f_metrics["qualified_count"], 1)
+        self.assertEqual(f_metrics["identified_count"], 2)
+
+        dash = get_commercial_performance_dashboard()
+        self.assertEqual(dash["prospective_accounts"], 1)
+        self.assertEqual(dash["qualified_leads"], 1)
+        self.assertEqual(dash["pilot_readiness_score"], 7.5)
 
 
 if __name__ == "__main__":

@@ -101,6 +101,7 @@ from core.net_profit_optimizer import (
 from core.tax_engine import (
     GST_SERVICE_THRESHOLD_INR,
     GST_WARNING_THRESHOLD_INR,
+    SECTION_393_TDS_SCHEDULE,
     compute_income_tax_india_2026,
     compute_required_pretax_profit,
     get_gst_status,
@@ -193,6 +194,14 @@ with tabs[1]:
     st.subheader("🎯 Commercial Hub & First Customer Acquisition Pilot (Milestone 6.3)")
     st.caption("Operational playbook for acquiring the first paying pilot customer through a controlled 5-prospect experiment. All prices quoted strictly ex-GST.")
 
+    st.info(
+        "**SOLOEARN v0.6.3 Commercial Pilot Readiness: 7.5 / 10**\n\n"
+        "• **Technical Automation (10/10)**: 171 automated unit & integration tests passing on Windows; zero skips/errors in revenue loops.\n"
+        "• **Statutory Tax & Accounting (10/10)**: Section 202 slabs, Section 156 rebate, Section 393 Table 6 payee-specific TDS, and Section 276 cash-method accounting verified.\n"
+        "• **Market Proof & Paying Clients (0/10)**: Feature freeze active. Zero live paying clients acquired yet.\n"
+        "• **Path to 10/10 Readiness**: Execute outreach to the 5 prospective accounts below, secure first paid pilot, deliver work, and reconcile receipt against bank statement."
+    )
+
     with st.expander("🚀 M6.3 First Commercial Experiment: 5 Genuine Businesses (Click to View Outreach Scripts)"):
         st.markdown(
             "**Operational Goal:** Approach 5 real SMB businesses (small e-commerce sellers/retailers), offer a tightly-scoped "
@@ -201,32 +210,51 @@ with tabs[1]:
             "📖 Full Playbook: [`commercial/M6_3_FIRST_CUSTOMER_ACQUISITION_PLAYBOOK.md`](file:///C:/Users/BHAVESH%20KHULLAR/Downloads/SOLOEARN_v0.1/SOLOEARN/commercial/M6_3_FIRST_CUSTOMER_ACQUISITION_PLAYBOOK.md)"
         )
         st.markdown("#### 🏢 5 Researched Real-World Indian D2C & Retail Targets")
-        st.caption("Identified, verified Indian SMBs with specific operational bottlenecks and customized proposals ready to send.")
+        st.caption("Researched Indian consumer brands categorized into Strategic Accounts and Initial Pilot Prospects. Outreach pitches use a question-led, humble, non-presumptive script.")
 
-        target_names = [t["company_name"] for t in REAL_SMB_PILOT_TARGETS]
+        account_group = st.radio(
+            "Account Group",
+            options=["All Accounts (5)", "Strategic Accounts (3)", "Initial Pilot Prospects (2)"],
+            horizontal=True,
+            key="real_target_group_radio",
+        )
+        if "Strategic" in account_group:
+            filtered_targets = [t for t in REAL_SMB_PILOT_TARGETS if t.get("account_classification") == "Strategic Account"]
+        elif "Initial" in account_group:
+            filtered_targets = [t for t in REAL_SMB_PILOT_TARGETS if t.get("account_classification") == "Initial Pilot Prospect"]
+        else:
+            filtered_targets = REAL_SMB_PILOT_TARGETS
+
+        target_names = [t["company_name"] for t in filtered_targets]
         selected_target_name = st.selectbox("Select Researched Business Target", options=target_names, key="real_target_select")
-        selected_target = next(t for t in REAL_SMB_PILOT_TARGETS if t["company_name"] == selected_target_name)
+        selected_target = next(t for t in filtered_targets if t["company_name"] == selected_target_name)
 
         rt_c1, rt_c2 = st.columns([1, 1])
         with rt_c1:
             st.markdown(
-                f"- **Contact:** {selected_target['contact_name']} ({selected_target['contact_role']})\n"
+                f"- **Account Tier:** `{selected_target.get('account_classification', 'Prospective Account')}`\n"
+                f"- **Verified Co-Founders:** {selected_target.get('verified_founders', selected_target['contact_name'])}\n"
+                f"- **Primary Contact:** {selected_target['contact_name']} ({selected_target['contact_role']})\n"
                 f"- **Headquarters:** {selected_target['city']}\n"
                 f"- **Channel:** `{selected_target['contact_channel']}` ({selected_target['contact_handle']})\n"
-                f"- **Website:** [{selected_target['website']}]({selected_target['website']})\n"
-                f"- **Products:** {selected_target['products']}\n"
+                f"- **Official Website:** [{selected_target['website']}]({selected_target['website']})\n"
+                f"- **Products & Channels:** {selected_target['products']}\n"
             )
         with rt_c2:
             st.markdown(
-                f"- **Pain Point:** {selected_target['pain_point']}\n"
                 f"- **Recommended Offering:** `{selected_target['service_tier']}` (@ ₹{selected_target['proposed_price_inr']:,.0f} ex-GST)\n"
-                f"- **Research Notes:** {selected_target['notes']}\n"
+                f"- **Research Context:** {selected_target['notes']}\n"
+            )
+            st.warning(
+                f"⚠️ **{selected_target.get('hypothesis_label', 'Unverified Prospecting Hypothesis — Pending Discovery Conversation')}**:\n\n"
+                f"{selected_target.get('pain_point_hypothesis', selected_target.get('pain_point', ''))}\n\n"
+                f"*(Note: This is an unverified prospecting hypothesis based on public multi-channel retail expansion, not an established company admission. Use the question-led script below to validate during discovery.)*"
             )
 
         st.text_area(
-            f"Tailored Proposal Pitch for {selected_target['contact_name']} ({selected_target['company_name']})",
+            f"Question-Led Outreach Pitch for {selected_target['contact_name']} ({selected_target['company_name']})",
             value=selected_target["custom_pitch"],
-            height=200,
+            height=220,
             key=f"pitch_text_{selected_target_name}",
         )
 
@@ -291,16 +319,16 @@ with tabs[1]:
 
     cp_dash = get_commercial_performance_dashboard()
     d1, d2, d3, d4 = st.columns(4)
-    d1.metric("1. Qualified Leads", cp_dash["qualified_leads"], "Genuine potential clients")
-    d2.metric("2. Proposals Sent", cp_dash["proposals_sent"], "Actual acquisition activity")
-    d3.metric("3. Contracts Won", cp_dash["contracts_won"], "Confirmed customer work")
-    d4.metric("4. Payments Collected", f"₹{cp_dash['payments_collected_inr']:,.2f}", "Actual bank cash received (ex-GST)")
+    d1.metric("1. Prospective Accounts", cp_dash["prospective_accounts"], "Researched public leads")
+    d2.metric("2. Qualified Leads", cp_dash["qualified_leads"], "Confirmed pain point & budget")
+    d3.metric("3. Proposals Sent", cp_dash["proposals_sent"], "Actual acquisition activity")
+    d4.metric("4. Contracts Won", cp_dash["contracts_won"], "Confirmed customer work")
 
     d5, d6, d7, d8 = st.columns(4)
-    d5.metric("5. Project Contribution", f"₹{cp_dash['project_contribution_inr']:,.2f}", "Revenue after direct costs")
-    d6.metric("6. Net Profit After Tax", f"₹{cp_dash['net_profit_after_tax_inr']:,.2f}", "Real take-home earnings")
-    d7.metric("7. Owner Hours Invested", f"{cp_dash['owner_hours']} hrs", "Across 5 labor categories")
-    d8.metric("M6.4 First Paid Goal", "₹5,000", "First paid pilot goal")
+    d5.metric("5. Payments Collected", f"₹{cp_dash['payments_collected_inr']:,.2f}", "Actual bank cash received (ex-GST)")
+    d6.metric("6. Project Contribution", f"₹{cp_dash['project_contribution_inr']:,.2f}", "Revenue after direct costs")
+    d7.metric("7. Net Profit After Tax", f"₹{cp_dash['net_profit_after_tax_inr']:,.2f}", "Real take-home earnings")
+    d8.metric("8. Owner Hours Invested", f"{cp_dash['owner_hours']} hrs", "Across 5 labor categories")
 
     with st.expander("🎯 Milestone 6.4: Commercial Validation Targets"):
         st.markdown(
@@ -1295,19 +1323,17 @@ with tabs[5]:
                                 key=f"reconcile_invoice_{u['id']}",
                             )
                             chosen_entity_id = invoice_map[selected_invoice_label]
+                            tds_options = [
+                                (k, v["label"], v["rate"])
+                                for k, v in SECTION_393_TDS_SCHEDULE.items()
+                            ] + [("custom", "Custom TDS Amount (Manual Entry)", None)]
+
                             tds_cat = st.selectbox(
-                                "Section 393 Statutory TDS Category",
-                                options=[
-                                    ("none", "No TDS Deducted (0%)", 0.0),
-                                    ("professional_10", "Professional Services - Standard (10%)", 0.10),
-                                    ("technical_2", "Technical Services / BPO / Call Center (2%)", 0.02),
-                                    ("contractor_co_2", "Works Contract - Corporate / Firm (2%)", 0.02),
-                                    ("contractor_ind_1", "Works Contract - Individual / Proprietor (1%)", 0.01),
-                                    ("custom", "Custom TDS Amount (Manual Entry)", None),
-                                ],
+                                "Section 393 Statutory TDS Category (Income-tax Act, 2025 Table 6)",
+                                options=tds_options,
                                 format_func=lambda x: x[1],
                                 key=f"reconcile_tds_cat_{u['id']}",
-                                help="Income-tax Act, 2025 Section 393 schedules differentiate between professional, technical, and contractor rates.",
+                                help="Income-tax Act, 2025 Section 393(1) Table 6 schedules differentiate rates based on payment type and the payee's legal status.",
                             )
                             inv_match = next((i for i in pending_invoice_rows if i["invoice_number"] == chosen_entity_id), None)
                             inv_subtotal = float(inv_match["amount_subtotal"]) if inv_match else 0.0

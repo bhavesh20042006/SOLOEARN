@@ -27,6 +27,49 @@ SUPPORTED_ENTITY_TYPE = "individual_sole_proprietor"
 SUPPORTED_ACCOUNTING_METHODS = {"cash", "mercantile"}  # Income-tax Act, 2025 Section 276
 TDS_STATUTORY_SECTION = "Section 393 (formerly Section 194J/194C)"
 
+# Statutory TDS schedules under Income-tax Act, 2025 Section 393(1) Table 6
+# Rates depend on the nature of payment and the legal status of the payee:
+SECTION_393_TDS_SCHEDULE: dict[str, dict[str, Any]] = {
+    "professional_services_10": {
+        "label": "Professional Services (Table 6(iii)) - Standard Rate (10%)",
+        "rate": 0.10,
+        "payee_type": "all_payees",
+        "description": "Standard rate under Section 393(1) Table 6(iii) for professional/consulting fees",
+    },
+    "technical_services_2": {
+        "label": "Technical Services / BPO / Call Center (Table 6) - Specified Rate (2%)",
+        "rate": 0.02,
+        "payee_type": "all_payees",
+        "description": "Specified technical and support services under Section 393 schedule",
+    },
+    "contractor_individual_payee_2": {
+        "label": "Works Contract (Table 6(i)) - Payee is Resident Individual / HUF (2%)",
+        "rate": 0.02,
+        "payee_type": "individual_or_huf",
+        "description": "Section 393(1) Table 6(i): Payee is individual/HUF (e.g. Solo Proprietor) -> 2%",
+    },
+    "contractor_other_payee_1": {
+        "label": "Works Contract (Table 6(i)) - Payee is other than Individual / HUF (1%)",
+        "rate": 0.01,
+        "payee_type": "other_than_individual",
+        "description": "Section 393(1) Table 6(i): Payee is Company, LLP, or Firm -> 1%",
+    },
+    "no_tds_0": {
+        "label": "No TDS Deducted (0% / Sub-threshold / Form 13 Nil Certificate)",
+        "rate": 0.0,
+        "payee_type": "any",
+        "description": "Payment below statutory threshold or under valid nil-deduction certificate",
+    },
+}
+
+
+def calculate_section_393_tds(subtotal_inr: float, category: str) -> float:
+    """Calculates the statutory Section 393 TDS amount for a given invoice subtotal and category."""
+    if category not in SECTION_393_TDS_SCHEDULE:
+        raise ValueError(f"Invalid Section 393 category: '{category}'. Valid: {list(SECTION_393_TDS_SCHEDULE)}")
+    rate = float(SECTION_393_TDS_SCHEDULE[category]["rate"])
+    return round(max(0.0, float(subtotal_inr)) * rate, 2)
+
 
 def validate_tax_profile(profile: dict[str, Any] | None) -> dict[str, str]:
     """Fail closed for taxpayer configurations the current estimate engine does not model."""
