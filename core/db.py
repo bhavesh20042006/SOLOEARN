@@ -197,8 +197,22 @@ def init_db() -> None:
                 other_pan_aggregate_turnover_inr REAL NOT NULL DEFAULT 0.0,
                 advance_tax_paid_inr REAL NOT NULL DEFAULT 0.0,
                 tds_credits_inr REAL NOT NULL DEFAULT 0.0,
+                gst_threshold_inr REAL NOT NULL DEFAULT 2000000.0,
                 is_active INTEGER NOT NULL DEFAULT 1,
                 created_at TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS owner_time_logs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                opportunity_id INTEGER,
+                task_id INTEGER,
+                category TEXT NOT NULL,
+                hours REAL NOT NULL,
+                description TEXT DEFAULT '',
+                logged_at TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                FOREIGN KEY(opportunity_id) REFERENCES opportunities(id),
+                FOREIGN KEY(task_id) REFERENCES tasks(id)
             );
 
             CREATE TABLE IF NOT EXISTS bank_statement_imports (
@@ -267,6 +281,10 @@ def init_db() -> None:
         if "other_pan_aggregate_turnover_inr" not in tax_cols:
             conn.execute(
                 "ALTER TABLE tax_profiles ADD COLUMN other_pan_aggregate_turnover_inr REAL NOT NULL DEFAULT 0.0"
+            )
+        if "gst_threshold_inr" not in tax_cols:
+            conn.execute(
+                "ALTER TABLE tax_profiles ADD COLUMN gst_threshold_inr REAL NOT NULL DEFAULT 2000000.0"
             )
 
 
@@ -1051,6 +1069,7 @@ def upsert_tax_profile(
     other_pan_aggregate_turnover_inr: float = 0.0,
     advance_tax_paid_inr: float = 0.0,
     tds_credits_inr: float = 0.0,
+    gst_threshold_inr: float = 2000000.0,
 ) -> int:
     """Inserts or updates the active tax profile."""
     with connect() as conn:
@@ -1059,9 +1078,9 @@ def upsert_tax_profile(
             """INSERT INTO tax_profiles (
                 profile_name, entity_type, residential_status, tax_year, regime,
                 other_annual_income_inr, other_pan_aggregate_turnover_inr,
-                advance_tax_paid_inr, tds_credits_inr,
+                advance_tax_paid_inr, tds_credits_inr, gst_threshold_inr,
                 is_active, created_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?)""",
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?)""",
             (
                 profile_name[:100],
                 entity_type[:50],
@@ -1072,6 +1091,7 @@ def upsert_tax_profile(
                 max(0.0, float(other_pan_aggregate_turnover_inr)),
                 max(0.0, float(advance_tax_paid_inr)),
                 max(0.0, float(tds_credits_inr)),
+                max(100000.0, float(gst_threshold_inr)),
                 utc_now(),
             ),
         )
@@ -1127,3 +1147,142 @@ def complete_revision(revision_id: int, diff_summary: str = "") -> None:
         )
         conn.execute("UPDATE tasks SET status='submission_ready' WHERE id=?", (rev["task_id"],))
     log_event("revision_completed", f"revision_id={revision_id}")
+
+
+# ---------------------------------------------------------------------------
+# OWNER TIME TRACKING (DELIVERY, PROSPECTING, COMMUNICATION, REVISIONS, ADMIN)
+# ---------------------------------------------------------------------------
+
+VALID_TIME_CATEGORIES = {
+    "delivery",
+    "prospecting",
+    "client_communication",
+    "revisions",
+    "administration",
+}
+
+
+def log_owner_time(
+    category: str,
+    hours: float,
+    opportunity_id: int | None = None,
+    task_id: int | None = None,
+    description: str = "",
+) -> int:
+    """Logs owner labor time under one of the 5 operational categories."""
+    cat = str(category).strip().lower()
+    if cat not in VALID_TIME_CATEGORIES:
+        raise ValueError(f"Invalid time category: {category!r}. Allowed: {VALID_TIME_CATEGORIES}")
+    h = float(hours)
+    if h <= 0 or not math.isfinite(h):
+        raise ValueError("Logged hours must be a positive finite number")
+
+    now = utc_now()
+    with connect() as conn:
+        cur = conn.execute(
+            """INSERT INTO owner_time_logs (
+                opportunity_id, task_id, category, hours, description, logged_at, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?)""",
+            (opportunity_id, task_id, cat, round(h, 2), description[:500], now[:10], now),
+        )
+        log_id = int(cur.lastrowid)
+    log_event("owner_time_logged", f"id={log_id}; cat={cat}; hours={h:.2f}")
+    return log_id
+
+
+def list_owner_time_logs(category: str | None = None) -> list[dict[str, Any]]:
+    with connect() as conn:
+        if category:
+            rows = conn.execute(
+                "SELECT * FROM owner_time_logs WHERE category=? ORDER BY id DESC",
+                (category.strip().lower(),),
+            ).fetchall()
+        else:
+            rows = conn.execute("SELECT * FROM owner_time_logs ORDER BY id DESC").fetchall()
+        return [dict(r) for r in rows]
+
+
+def get_owner_time_summary() -> dict[str, Any]:
+    """Returns breakdown of total hours across the 5 categories."""
+    with connect() as conn:
+        rows = conn.execute(
+            "SELECT category, SUM(hours) as total_hours, COUNT(*) as log_count FROM owner_time_logs GROUP BY category"
+        ).fetchall()
+        by_cat = {c: 0.0 for c in VALID_TIME_CATEGORIES}
+        for r in rows:
+            if r["category"] in by_cat:
+                by_cat[r["category"]] = round(float(r["total_hours"] or 0.0), 2)
+        total_h = round(sum(by_cat.values()), 2)
+        return {
+            "by_category": by_cat,
+            "total_hours": total_h,
+            "delivery_hours": by_cat["delivery"],
+            "prospecting_hours": by_cat["prospecting"],
+            "communication_hours": by_cat["client_communication"],
+            "client_communication_hours": by_cat["client_communication"],
+            "revisions_hours": by_cat["revisions"],
+            "administration_hours": by_cat["administration"],
+        }
+
+
+def get_financial_states_summary() -> dict[str, float]:
+    """
+    Distinguishes the 6 financial states across the lifecycle:
+    1. estimated_pipeline: opportunities in 'new', 'screened', 'proposal_approved'
+    2. contracted: opportunities in 'approved_for_work', 'in_progress'
+    3. invoiced: non-cancelled invoices in 'issued' or 'payment_pending'
+    4. collected_cash: actual net bank cash receipts
+    5. tds_receivable: verified TDS credits withheld by clients
+    6. reconciled_paid: invoices fully reconciled and settled
+    7. refunded: client refunds and credit notes
+    """
+    with connect() as conn:
+        # 1. Estimated Pipeline
+        row = conn.execute(
+            "SELECT COALESCE(SUM(amount_inr), 0) FROM opportunities WHERE status IN ('new', 'screened', 'proposal_approved')"
+        ).fetchone()
+        estimated = float(row[0] if row else 0.0)
+
+        # 2. Contracted Pipeline
+        row = conn.execute(
+            "SELECT COALESCE(SUM(amount_inr), 0) FROM opportunities WHERE status IN ('approved_for_work', 'in_progress')"
+        ).fetchone()
+        contracted = float(row[0] if row else 0.0)
+
+        # 3. Invoiced (unpaid)
+        row = conn.execute(
+            "SELECT COALESCE(SUM(amount_total), 0) FROM invoices WHERE status IN ('issued', 'payment_pending')"
+        ).fetchone()
+        invoiced = float(row[0] if row else 0.0)
+
+        # 4. Reconciled & Paid Invoices
+        row = conn.execute(
+            "SELECT COALESCE(SUM(amount_total), 0) FROM invoices WHERE status = 'paid'"
+        ).fetchone()
+        reconciled_paid = float(row[0] if row else 0.0)
+
+        # 5. Collected Cash & TDS from Ledger
+        tx_rows = conn.execute(
+            "SELECT tx_type, SUM(amount_inr) FROM financial_transactions GROUP BY tx_type"
+        ).fetchall()
+        tx_sums = {r[0]: float(r[1] or 0.0) for r in tx_rows}
+        collected_cash = tx_sums.get("client_receipt", 0.0)
+        tds_withheld = tx_sums.get("tds_credit", 0.0)
+        refunded = tx_sums.get("refund", 0.0) + tx_sums.get("gst_refund", 0.0)
+
+        prof = get_active_tax_profile()
+        total_tds_credits = float(prof["tds_credits_inr"]) if prof else tds_withheld
+
+        return {
+            "estimated_pipeline_inr": round(estimated, 2),
+            "contracted_inr": round(contracted, 2),
+            "contracted_pipeline_inr": round(contracted, 2),
+            "invoiced_unpaid_inr": round(invoiced, 2),
+            "invoiced_pending_inr": round(invoiced, 2),
+            "reconciled_paid_inr": round(reconciled_paid, 2),
+            "reconciled_settled_inr": round(reconciled_paid, 2),
+            "collected_cash_inr": round(collected_cash, 2),
+            "cash_collected_inr": round(collected_cash, 2),
+            "tds_receivable_inr": round(total_tds_credits, 2),
+            "refunded_inr": round(refunded, 2),
+        }

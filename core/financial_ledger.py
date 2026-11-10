@@ -589,13 +589,17 @@ def reconcile_statement_row(
     entity_type: str,
     entity_id: str,
     owner_confirmed: bool = True,
+    tds_withheld_inr: float = 0.0,
 ) -> dict[str, Any]:
     """
     Reconciles a bank statement entry only after validating direction, entity,
     outstanding invoice/expense amount, and duplicate references.
 
-    This release supports full invoice and expense settlement only. Partial
-    settlements are rejected rather than incorrectly marking the full item paid.
+    Supports exact invoice settlement via bank cash alone or bank cash plus verified
+    client TDS withheld (Section 194J/194C):
+      Bank Credit + TDS Withheld == Invoice Gross Total
+
+    Partial settlements without verified TDS or overpayments are rejected.
     """
     if owner_confirmed is not True:
         raise ValueError("Reconciliation requires explicit owner verification checkbox")
@@ -603,6 +607,8 @@ def reconcile_statement_row(
     allowed_entities = {"invoice", "expense", "owner_draw", "tax_payment", "gst_payment", "other"}
     if entity_type not in allowed_entities:
         raise ValueError(f"Invalid matched entity type: '{entity_type}'")
+
+    tds_val = max(0.0, round(float(tds_withheld_inr or 0.0), 2))
 
     with connect() as conn:
         conn.execute("BEGIN IMMEDIATE")
@@ -634,10 +640,11 @@ def reconcile_statement_row(
             if inv["status"] not in {"issued", "payment_pending"}:
                 raise ValueError(f"Invoice {inv['invoice_number']} is not awaiting payment")
             expected = round(float(inv["amount_total"]), 2)
-            if abs(amount - expected) >= 0.01:
+            settled_amount = round(amount + tds_val, 2)
+            if abs(settled_amount - expected) >= 0.01:
                 raise ValueError(
-                    f"Bank credit ₹{amount:,.2f} does not exactly settle invoice total "
-                    f"₹{expected:,.2f}. Partial/over-payments are not supported yet; "
+                    f"Bank credit ₹{amount:,.2f} + TDS withheld ₹{tds_val:,.2f} (Total: ₹{settled_amount:,.2f}) "
+                    f"does not exactly settle invoice total ₹{expected:,.2f}. Partial/over-payments are not supported yet; "
                     "leave this row unreconciled."
                 )
             if bank_ref:
@@ -752,6 +759,21 @@ def reconcile_statement_row(
                             inv_num, f"GST collected on {inv_num}", now,
                         ),
                     )
+                if tds_val > 0:
+                    conn.execute(
+                        """INSERT INTO financial_transactions (
+                            tx_date, tx_type, amount_inr, amount_paise, currency,
+                            reference_id, description, is_reversal, created_at
+                        ) VALUES (?, 'tds_credit', ?, ?, 'INR', ?, ?, 0, ?)""",
+                        (
+                            str(st_row["tx_date"])[:10], tds_val, inr_to_paise(tds_val),
+                            inv_num, f"TDS withheld by client on {inv_num} ({inv['client_name']})", now,
+                        ),
+                    )
+                    conn.execute(
+                        "UPDATE tax_profiles SET tds_credits_inr = tds_credits_inr + ? WHERE is_active = 1",
+                        (tds_val,),
+                    )
 
         elif entity_type == "expense" and exp is not None:
             exp_ref = f"EXP-{int(exp['id']):05d}"
@@ -817,6 +839,8 @@ def reconcile_statement_row(
         "statement_row_id": row_id,
         "matched_entity": f"{entity_type}:{entity_id}",
         "status": "reconciled",
+        "amount_inr": amount,
+        "tds_withheld_inr": tds_val,
         "reconciled_at": utc_now(),
     }
 
@@ -947,7 +971,9 @@ def get_cash_and_reserves_summary(
         )
         annual_tax = inc_res["incremental_business_tax"]
         monthly_tax_provision = round(annual_tax / 12.0, 2)
-        income_tax_reserve = max(0.0, round(monthly_tax_provision - (advance_tax + tds_credits) / 12.0, 2))
+        total_prepayments = round(advance_tax + tds_credits, 2)
+        remaining_annual_tax = max(0.0, round(annual_tax - total_prepayments, 2))
+        income_tax_reserve = min(monthly_tax_provision, round(remaining_annual_tax / 12.0, 2))
 
         buffer_reserve = max(0.0, float(working_capital_buffer_inr))
 
@@ -971,6 +997,9 @@ def get_cash_and_reserves_summary(
         "gst_liability_reserve_inr": gst_liability_reserve,
         "income_tax_reserve_inr": income_tax_reserve,
         "monthly_tax_provision_inr": monthly_tax_provision,
+        "annual_tax_inr": annual_tax,
+        "total_prepayments_inr": total_prepayments,
+        "remaining_annual_tax_inr": remaining_annual_tax,
         "unpaid_bills_inr": unpaid_bills,
         "working_capital_buffer_inr": buffer_reserve,
         "distributable_cash_inr": distributable_cash,

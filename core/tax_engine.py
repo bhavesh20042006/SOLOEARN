@@ -278,41 +278,48 @@ def compute_required_pretax_profit(
     return round((low + high) / 2.0, 2)
 
 
-def get_gst_status(total_service_turnover: float) -> dict[str, Any]:
+def get_gst_status(
+    total_service_turnover: float,
+    threshold_inr: float = GST_SERVICE_THRESHOLD_INR,
+) -> dict[str, Any]:
     """
-    Monitors aggregate service turnover against the statutory CBIC GST registration threshold.
-    Alerts the owner when approaching or exceeding ₹20 Lakhs (with warning at ₹18 Lakhs).
+    Monitors aggregate service turnover against the applicable CBIC GST registration threshold.
+    Supports standard state threshold (₹20 Lakhs) or special category states (₹10 Lakhs).
+    Alerts the owner when approaching (90% of threshold) or exceeding the limit.
     """
     turnover = max(0.0, float(total_service_turnover))
-    is_warning = GST_WARNING_THRESHOLD_INR <= turnover < GST_SERVICE_THRESHOLD_INR
-    is_mandatory = turnover >= GST_SERVICE_THRESHOLD_INR
+    thresh = max(100000.0, float(threshold_inr))
+    warn_thresh = 0.90 * thresh
+
+    is_warning = warn_thresh <= turnover < thresh
+    is_mandatory = turnover >= thresh
 
     if is_mandatory:
         status = "CA_REVIEW_REQUIRED"
         message = (
-            f"Aggregate service turnover (₹{turnover:,.2f}) has reached or exceeded the ₹20,00,000 "
+            f"Aggregate same-PAN service turnover (₹{turnover:,.2f}) has reached or exceeded the ₹{thresh:,.0f} "
             "statutory GST threshold assumption. Immediate Chartered Accountant review is required to formalize "
-            "GST registration and tax invoicing (state-specific rules and exceptions apply)."
+            "GST registration and tax invoicing. Registration is not automatic and tax cannot be charged until registered."
         )
     elif is_warning:
         status = "APPROACHING_THRESHOLD"
         message = (
-            f"Aggregate turnover (₹{turnover:,.2f}) is approaching the ₹20,00,000 common GST threshold "
-            f"(₹{GST_SERVICE_THRESHOLD_INR - turnover:,.2f} remaining). Schedule CA review."
+            f"Aggregate turnover (₹{turnover:,.2f}) is approaching the ₹{thresh:,.0f} statutory threshold "
+            f"(₹{thresh - turnover:,.2f} remaining). Schedule CA review before accepting further contracts."
         )
     else:
         status = "BELOW_THRESHOLD"
         message = (
-            f"Turnover (₹{turnover:,.2f}) is below the ₹20,00,000 common GST registration threshold assumption. "
-            f"Headroom: ₹{GST_SERVICE_THRESHOLD_INR - turnover:,.2f}."
+            f"Turnover (₹{turnover:,.2f}) is below the ₹{thresh:,.0f} registration threshold assumption. "
+            f"Headroom: ₹{thresh - turnover:,.2f}."
         )
 
     return {
         "turnover_inr": turnover,
-        "standard_threshold_inr": GST_SERVICE_THRESHOLD_INR,
-        "warning_threshold_inr": GST_WARNING_THRESHOLD_INR,
+        "standard_threshold_inr": thresh,
+        "warning_threshold_inr": warn_thresh,
         "status": status,
         "message": message,
         "requires_ca_review": is_mandatory,
-        "headroom_inr": max(0.0, GST_SERVICE_THRESHOLD_INR - turnover),
+        "headroom_inr": max(0.0, thresh - turnover),
     }

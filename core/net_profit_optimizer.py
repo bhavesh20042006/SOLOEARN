@@ -27,6 +27,7 @@ from core.tax_engine import (
 
 MONTHLY_NET_PROFIT_TARGET_INR = 100000.0  # ₹1 Lakh / Month post-tax
 MONTHLY_BUFFER_TARGET_INR = 125000.0      # ₹1.25 Lakh / Month internal buffer
+MONTHLY_SAFETY_BUFFER_TARGET_INR = 125000.0  # ₹1.25 Lakh / Month safety buffer
 ANNUAL_NET_PROFIT_TARGET_INR = 1200000.0   # ₹12 Lakh / Year post-tax
 
 MINIMUM_ACCEPTABLE_CONTRIBUTION_MARGIN = 0.50  # 50% minimum margin to accept work
@@ -120,6 +121,11 @@ class NetProfitPlan:
     recommended_action: str
     bank_balance_known: bool = False
     service_economics: list[dict[str, Any]] = field(default_factory=list)
+    monthly_safety_buffer_target_inr: float = MONTHLY_SAFETY_BUFFER_TARGET_INR
+    annual_pretax_safety_buffer_required_inr: float = 0.0
+    monthly_pretax_safety_buffer_required_inr: float = 0.0
+    safety_buffer_gap_inr: float = 0.0
+    safety_buffer_jobs_needed: dict[str, int] = field(default_factory=dict)
 
 
 class NetProfitOptimizer:
@@ -340,8 +346,9 @@ class NetProfitOptimizer:
             ).fetchone()
             invoice_turnover = float(row_inv[0] if row_inv else 0.0)
         other_pan_turnover = float(tax_prof.get("other_pan_aggregate_turnover_inr", 0.0)) if tax_prof else 0.0
+        gst_threshold = float(tax_prof.get("gst_threshold_inr", 2000000.0)) if tax_prof else 2000000.0
         total_turnover = invoice_turnover + other_pan_turnover
-        gst_info = get_gst_status(total_turnover)
+        gst_info = get_gst_status(total_turnover, threshold_inr=gst_threshold)
         gst_info["soloearn_invoice_turnover_inr"] = round(invoice_turnover, 2)
         gst_info["other_same_pan_turnover_inr"] = round(other_pan_turnover, 2)
         gst_info["turnover_basis"] = "FY non-cancelled invoice subtotals plus owner-entered other aggregate turnover under the same PAN; CA review required"
@@ -359,6 +366,21 @@ class NetProfitOptimizer:
                 gap, s.net_contribution_inr, taxable_business_profit,
                 other_annual_income, regime=tax_settings["regime"],
             ) if gap > 0 else 0
+            for s in SERVICE_PROFIT_SPECS
+        }
+
+        # Safety buffer modeling (target: ₹1.25 Lakh / month post-tax)
+        annual_buffer_target = MONTHLY_SAFETY_BUFFER_TARGET_INR * 12.0
+        annual_pretax_buffer_req = compute_required_pretax_profit(
+            annual_buffer_target, other_annual_income, regime=tax_settings["regime"]
+        )
+        monthly_pretax_buffer_req = round(annual_pretax_buffer_req / 12.0, 2)
+        buffer_gap = max(0.0, round(MONTHLY_SAFETY_BUFFER_TARGET_INR - mtd_net_profit, 2))
+        buffer_needed_by_tier = {
+            s.tier_id: cls._jobs_required_for_after_tax_gap(
+                buffer_gap, s.net_contribution_inr, taxable_business_profit,
+                other_annual_income, regime=tax_settings["regime"],
+            ) if buffer_gap > 0 else 0
             for s in SERVICE_PROFIT_SPECS
         }
 
@@ -411,4 +433,9 @@ class NetProfitOptimizer:
             },
             recommended_action=rec,
             service_economics=cls.get_service_economics(),
+            monthly_safety_buffer_target_inr=MONTHLY_SAFETY_BUFFER_TARGET_INR,
+            annual_pretax_safety_buffer_required_inr=annual_pretax_buffer_req,
+            monthly_pretax_safety_buffer_required_inr=monthly_pretax_buffer_req,
+            safety_buffer_gap_inr=buffer_gap,
+            safety_buffer_jobs_needed=buffer_needed_by_tier,
         )

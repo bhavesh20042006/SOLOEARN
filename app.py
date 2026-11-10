@@ -59,6 +59,10 @@ from core.db import (
     get_bank_opening_balance,
     set_bank_opening_balance,
     upsert_tax_profile,
+    log_owner_time,
+    list_owner_time_logs,
+    get_owner_time_summary,
+    get_financial_states_summary,
 )
 from core.discovery_engine import DiscoveryEngine
 from core.invoice_generator import render_invoice_html
@@ -86,6 +90,7 @@ from core.financial_ledger import (
 from core.net_profit_optimizer import (
     MONTHLY_BUFFER_TARGET_INR,
     MONTHLY_NET_PROFIT_TARGET_INR,
+    MONTHLY_SAFETY_BUFFER_TARGET_INR,
     NetProfitOptimizer,
     SERVICE_PROFIT_SPECS,
 )
@@ -353,6 +358,38 @@ with tabs[1]:
             )
     else:
         st.info("Run `python scripts/run_sample_job_verification.py` to regenerate the verified sample deliverable package.")
+
+    # Section 5: Owner Time & Operational Labor Tracking (5 Categories)
+    st.divider()
+    st.markdown("### ⏱️ Owner Labor & Time Tracking (5 Operational Categories)")
+    st.caption("Delivery is only one component of solo operations. Track all 5 operational categories to monitor actual capacity.")
+
+    time_summary = get_owner_time_summary()
+    ot1, ot2, ot3, ot4, ot5 = st.columns(5)
+    ot1.metric("1. Delivery", f"{time_summary['delivery_hours']} hrs")
+    ot2.metric("2. Prospecting", f"{time_summary['prospecting_hours']} hrs")
+    ot3.metric("3. Communication", f"{time_summary['client_communication_hours']} hrs")
+    ot4.metric("4. Revisions", f"{time_summary['revisions_hours']} hrs")
+    ot5.metric("5. Administration", f"{time_summary['administration_hours']} hrs")
+    st.write(f"**Total Owner Time Logged:** **{time_summary['total_hours']} hours**")
+
+    with st.expander("➕ Log Owner Working Hours"):
+        with st.form("log_owner_time_form", clear_on_submit=True):
+            t_cat = st.selectbox(
+                "Activity Category",
+                options=["delivery", "prospecting", "client_communication", "revisions", "administration"],
+                format_func=lambda x: x.replace("_", " ").title(),
+            )
+            t_hours = st.number_input("Hours Spent", min_value=0.25, max_value=24.0, value=1.0, step=0.25)
+            t_desc = st.text_input("Description / Notes", placeholder="e.g. Scoping call with client; normalizing CSV headers; preparing quarterly advance tax")
+            t_sub = st.form_submit_button("Log Hours")
+            if t_sub:
+                try:
+                    log_id = log_owner_time(category=t_cat, hours=t_hours, description=t_desc)
+                    st.success(f"Logged {t_hours} hrs under {t_cat.replace('_', ' ').title()} (Log #{log_id}).")
+                    st.rerun()
+                except Exception as ex:
+                    st.error(f"Error logging time: {ex}")
 
 
 # ----------------- Tab 2: Autonomous Discovery (Milestone 4) -----------------
@@ -695,6 +732,20 @@ with tabs[4]:
     st.subheader("🧾 Client Invoicing & Owner-Confirmed Receipts (Milestone 5)")
     st.caption("Generate local invoice drafts and record owner-confirmed receipts. SOLOEARN does not connect to a bank or independently verify UTRs.")
 
+    # 6 Financial Lifecycle States
+    st.markdown("### 📊 Financial Lifecycle States")
+    f_states = get_financial_states_summary()
+    fs1, fs2, fs3 = st.columns(3)
+    fs1.metric("1. Estimated Pipeline", f"₹{f_states['estimated_pipeline_inr']:,.2f}", "Early leads/proposals")
+    fs2.metric("2. Contracted Pipeline", f"₹{f_states['contracted_pipeline_inr']:,.2f}", "Approved for work")
+    fs3.metric("3. Invoiced (Pending)", f"₹{f_states['invoiced_pending_inr']:,.2f}", "Awaiting client payment")
+
+    fs4, fs5, fs6 = st.columns(3)
+    fs4.metric("4. Cash Collected", f"₹{f_states['cash_collected_inr']:,.2f}", "Bank credits received")
+    fs5.metric("5. TDS Receivable", f"₹{f_states['tds_receivable_inr']:,.2f}", "Client tax withheld")
+    fs6.metric("6. Reconciled & Settled", f"₹{f_states['reconciled_settled_inr']:,.2f}", "Confirmed against bank")
+    st.divider()
+
     inv_col1, inv_col2 = st.columns([1, 1])
 
     with inv_col1:
@@ -863,6 +914,16 @@ with tabs[5]:
 
     st.info(f"💡 **Net Profit Intelligence:** {np_plan.recommended_action}")
 
+    # Safety Buffer Model
+    with st.expander("🛡️ Internal Safety Buffer Target (₹1,25,000 / Month Post-Tax)"):
+        st.caption("Internal safety model designed to absorb inevitable real-world friction (delays, subscriptions, revisions) while keeping take-home profit strictly ≥ ₹1,00,000.")
+        sb1, sb2, sb3 = st.columns(3)
+        sb1.metric("Safety Buffer Target", f"₹{np_plan.monthly_safety_buffer_target_inr:,.0f}/mo", f"₹{np_plan.monthly_safety_buffer_target_inr * 12:,.0f}/yr")
+        sb2.metric("Required Pre-Tax Business Profit", f"₹{np_plan.monthly_pretax_safety_buffer_required_inr:,.0f}/mo", f"₹{np_plan.annual_pretax_safety_buffer_required_inr:,.0f}/yr")
+        sb3.metric("Safety Buffer Gap", f"₹{np_plan.safety_buffer_gap_inr:,.0f}/mo", "Effective Tax: 8.05%")
+        st.write("**Job Capacities Needed for Safety Buffer:**")
+        st.json(np_plan.safety_buffer_jobs_needed)
+
     # Section 1: Financial Reserves & GST Separation
     st.divider()
     st.markdown("### ⚖️ Tax, GST & Cash Runway Reserves (C = B - G - T - U - W)")
@@ -991,12 +1052,21 @@ with tabs[5]:
                     value=float(active_prof["tds_credits_inr"]) if active_prof else 0.0,
                     step=2500.0
                 )
+                curr_gst_thresh = float(active_prof.get("gst_threshold_inr", 2000000.0)) if active_prof else 2000000.0
+                gst_thresh_choice = st.selectbox(
+                    "Applicable GST Registration Threshold",
+                    options=[2000000.0, 1000000.0],
+                    format_func=lambda x: f"₹{x:,.0f} ({'Standard States' if x == 2000000.0 else 'Special Category States: Manipur, Mizoram, Nagaland, Tripura'})",
+                    index=0 if curr_gst_thresh == 2000000.0 else 1,
+                    help="CBIC GST threshold for service providers is ₹20 Lakhs in most states, but ₹10 Lakhs in Special Category states.",
+                )
                 if st.form_submit_button("Update Tax Profile"):
                     upsert_tax_profile(
                         other_annual_income_inr=other_inc,
                         other_pan_aggregate_turnover_inr=other_pan_turnover,
                         advance_tax_paid_inr=adv_tax,
                         tds_credits_inr=tds_credit,
+                        gst_threshold_inr=gst_thresh_choice,
                     )
                     st.success("Tax profile updated!")
                     st.rerun()
@@ -1035,6 +1105,7 @@ with tabs[5]:
                         key=f"reconcile_type_{u['id']}",
                     )
                     chosen_entity_id = ""
+                    tds_input = 0.0
                     if chosen_entity == "invoice":
                         invoice_map = {
                             f"{i['invoice_number']} · {i['client_name']} · ₹{i['amount_total']:,.2f}": i["invoice_number"]
@@ -1047,6 +1118,14 @@ with tabs[5]:
                                 key=f"reconcile_invoice_{u['id']}",
                             )
                             chosen_entity_id = invoice_map[selected_invoice_label]
+                            tds_input = st.number_input(
+                                "TDS Withheld by Client ₹ (if deducted under Sec 194J/194C)",
+                                min_value=0.0,
+                                value=0.0,
+                                step=100.0,
+                                key=f"reconcile_tds_{u['id']}",
+                                help="Enter tax deducted by corporate client. Bank credit + TDS must equal invoice total.",
+                            )
                         else:
                             st.warning("No unpaid invoices are available. Choose 'other' or create the correct invoice first.")
                             chosen_entity_id = ""
@@ -1085,6 +1164,7 @@ with tabs[5]:
                                 entity_type=chosen_entity,
                                 entity_id=chosen_entity_id,
                                 owner_confirmed=owner_ok,
+                                tds_withheld_inr=tds_input,
                             )
                             st.success(f"Bank row #{u['id']} reconciled.")
                             st.rerun()
