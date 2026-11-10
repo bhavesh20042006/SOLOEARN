@@ -273,6 +273,28 @@ with tabs[1]:
             "- **Verified project-level profit and delivery time tracking**\n"
         )
 
+    # First-Customer Acquisition Scoreboard (Pilot Progress 0/7)
+    st.markdown("### 🏆 First-Customer Acquisition Scoreboard")
+    sb_data = cp_dash.get("scoreboard", {})
+    score = sb_data.get("score", 0)
+    total = sb_data.get("total", 7)
+    st.write(f"**Your Pilot Progress: {score} / {total}** ({int(score / total * 100)}% complete)")
+    st.progress(score / total)
+
+    sb_cols = st.columns(2)
+    items = sb_data.get("items", [])
+    midpoint = (len(items) + 1) // 2
+    with sb_cols[0]:
+        for item in items[:midpoint]:
+            icon = "✅" if item["completed"] else "⬜"
+            st.markdown(f"{icon} **{item['title']}**")
+    with sb_cols[1]:
+        for item in items[midpoint:]:
+            icon = "✅" if item["completed"] else "⬜"
+            st.markdown(f"{icon} **{item['title']}**")
+
+    st.divider()
+
     # 50/30/5/3 Campaign Progress Metrics
     f_metrics = get_funnel_metrics()
     c1, c2, c3, c4 = st.columns(4)
@@ -1015,7 +1037,12 @@ with tabs[5]:
         sb_col2.metric("Pre-Tax Contribution", f"₹{sb_model['monthly_pretax_contribution_inr']:,.0f}/mo")
         sb_col3.metric("Monthly Tax Provision", f"₹{sb_model['monthly_tax_provision_inr']:,.0f}/mo", "Sec 202 slabs")
         sb_col4.metric("Post-Tax Net Profit", f"₹{sb_model['monthly_posttax_profit_inr']:,.0f}/mo", "+₹30,312 buffer")
-        st.caption(f"Mix: 9 Analytics (@ ₹5k) + 5 Reconciliation (@ ₹10k) + 4 ETL (@ ₹15k). Delivery effort: ~53 hours/month. Active Tax Accounting Method: **{np_plan.accounting_method.upper()}** (Sec 276).")
+        st.caption(
+            f"Mix: 9 Analytics (@ ₹5k) + 5 Reconciliation (@ ₹10k) + 4 ETL (@ ₹15k). Delivery effort: ~53 hours/month. "
+            f"Active Tax Accounting Method: **{np_plan.accounting_method.upper()}** (Sec 276). "
+            "Note: Statutory GST registration threshold applies to aggregate Financial Year turnover (current FY invoice total + other PAN turnover), not an annualized forecast. "
+            "All targets require deducting 100% of actual operating expenses and income tax before declaring targets achieved."
+        )
 
     # Section 1: Financial Reserves & GST Separation
     st.divider()

@@ -363,6 +363,54 @@ class FinancialAccuracyAuditTests(unittest.TestCase):
             self.assertEqual(s.target_price_inr, expected_prices[s.tier_id])
             self.assertGreater(s.contribution_margin_pct, 50.0)
 
+    def test_optimizer_deducts_all_actual_expenses_before_declaring_target_achieved(self):
+        """
+        Verifies that the optimizer deducts 100% of actual operating expenses
+        before declaring either the base target (₹1.0L) or safety buffer (₹1.25L) achieved.
+        """
+        # Register ₹40,000 in expenses
+        register_expense(vendor="Cloud GPU Co", category="hosting_infra", amount_inr=40000.0)
+        # Create an opportunity, task, and invoice of ₹1,30,000
+        opp_id = self._create_opp("Data Analytics Retainer", 130000.0, status="submitted_by_owner")
+        task_id = create_task("Analytics Retainer Delivery", "data_analytics", "ws_exp", opp_id)
+        with connect() as conn:
+            conn.execute("UPDATE tasks SET status='submission_ready', artifact_path='deliverables.zip' WHERE id=?", (task_id,))
+        inv = create_invoice(opp_id, client_name="Test Corp", service_tier="data_analytics", amount_subtotal=130000.0, tax_rate=0.0)
+        inv_num = inv["invoice_number"]
+
+        import_bank_statement_csv(
+            b"Date,Description,Reference,Amount,Direction\n2026-11-01,Test Corp Deposit,DEP-EXP-1,130000.00,credit\n",
+            filename="stmt.csv",
+        )
+        with connect() as conn:
+            row = conn.execute("SELECT id FROM bank_statement_rows WHERE bank_ref='DEP-EXP-1'").fetchone()
+            row_id = row["id"]
+        reconcile_statement_row(row_id, entity_type="invoice", entity_id=inv_num, owner_confirmed=True)
+
+        plan = NetProfitOptimizer.analyze_net_profit()
+        self.assertEqual(plan.mtd_operating_expenses_inr, 40000.0)
+        self.assertEqual(plan.mtd_collected_receipts_inr, 130000.0)
+        self.assertEqual(plan.mtd_operating_profit_inr, 90000.0)
+        self.assertFalse(plan.is_target_achieved)
+        self.assertFalse(plan.is_safety_buffer_achieved)
+        self.assertGreater(plan.net_profit_gap_inr, 0.0)
+        self.assertGreater(plan.safety_buffer_gap_inr, 0.0)
+        self.assertIn("Current post-tax net profit gap", plan.recommended_action)
+
+    def test_first_customer_acquisition_scoreboard_progress(self):
+        """
+        Tests that get_commercial_performance_dashboard returns a 7-step scoreboard
+        distinguishing genuine commercial progression.
+        """
+        from core.commercial_funnel import get_commercial_performance_dashboard, init_commercial_tables
+        init_commercial_tables()
+        dash = get_commercial_performance_dashboard()
+        sb = dash["scoreboard"]
+        self.assertEqual(sb["total"], 7)
+        self.assertIsInstance(sb["items"], list)
+        self.assertEqual(len(sb["items"]), 7)
+        self.assertIn("score", sb)
+
 
 if __name__ == "__main__":
     unittest.main()

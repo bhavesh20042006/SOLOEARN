@@ -275,7 +275,7 @@ def get_commercial_performance_dashboard() -> dict[str, Any]:
     time_summary = get_owner_time_summary()
 
     with connect() as conn:
-        row_props = conn.execute("SELECT COUNT(*) FROM proposals WHERE is_authorized = 1").fetchone()
+        row_props = conn.execute("SELECT COUNT(*) FROM proposals WHERE status = 'approved_by_owner'").fetchone()
         proposals_sent = int(row_props[0] if row_props else 0)
 
         row_won = conn.execute(
@@ -289,9 +289,31 @@ def get_commercial_performance_dashboard() -> dict[str, Any]:
         ).fetchall()
         repeat_customers_count = len(row_repeat)
 
+        row_qa = conn.execute("SELECT COUNT(*) FROM tasks WHERE status IN ('submission_ready', 'completed')").fetchone()
+        qa_passed_count = int(row_qa[0] if row_qa else 0)
+
     payments_collected = cash_info["collected_receipts_inr"]
     operating_profit = cash_info["operating_profit_inr"]
     net_profit = round(operating_profit - cash_info["monthly_tax_provision_inr"], 2)
+
+    step1 = f_metrics["identified_count"] >= 5
+    step2 = max(proposals_sent, f_metrics["approached_count"]) >= 5
+    step3 = f_metrics["in_conversation_count"] >= 1
+    step4 = f_metrics["paid_pilot_count"] >= 1 or contracts_won >= 1
+    step5 = qa_passed_count >= 1
+    step6 = payments_collected > 0
+    step7 = time_summary["total_hours"] > 0 and cash_info["total_operating_expenses_inr"] > 0
+
+    scoreboard_items = [
+        {"id": 1, "title": "Five qualified businesses identified", "completed": step1},
+        {"id": 2, "title": "Five personalized approaches sent", "completed": step2},
+        {"id": 3, "title": "At least one serious customer conversation", "completed": step3},
+        {"id": 4, "title": "First paid pilot secured", "completed": step4},
+        {"id": 5, "title": "Deliverables independently checked", "completed": step5},
+        {"id": 6, "title": "Payment confirmed against bank statement", "completed": step6},
+        {"id": 7, "title": "Actual project costs and owner hours recorded", "completed": step7},
+    ]
+    scoreboard_completed = sum(1 for item in scoreboard_items if item["completed"])
 
     return {
         "qualified_leads": f_metrics["identified_count"],
@@ -301,6 +323,11 @@ def get_commercial_performance_dashboard() -> dict[str, Any]:
         "project_contribution_inr": operating_profit,
         "net_profit_after_tax_inr": net_profit,
         "owner_hours": time_summary["total_hours"],
+        "scoreboard": {
+            "score": scoreboard_completed,
+            "total": 7,
+            "items": scoreboard_items,
+        },
         "m64_validation_targets": {
             "prospective_businesses_target": 5,
             "prospective_businesses_current": f_metrics["identified_count"],

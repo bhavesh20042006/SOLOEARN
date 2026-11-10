@@ -127,6 +127,8 @@ class NetProfitPlan:
     safety_buffer_gap_inr: float = 0.0
     safety_buffer_jobs_needed: dict[str, int] = field(default_factory=dict)
     accounting_method: str = "cash"
+    is_target_achieved: bool = False
+    is_safety_buffer_achieved: bool = False
 
 
 class NetProfitOptimizer:
@@ -426,18 +428,28 @@ class NetProfitOptimizer:
             else "unknown (opening balance unconfirmed)"
         )
 
-        if gap <= 0:
+        target_achieved = gap <= 0
+        safety_buffer_achieved = buffer_gap <= 0
+
+        if safety_buffer_achieved:
             rec = (
-                f"Net profit target achieved: ₹{mtd_net_profit:,.2f} confirmed post-tax profit this month "
-                f"(after ₹{operating_expenses:,.2f} in expenses and ₹{mtd_income_tax:,.2f} in estimated tax). "
+                f"Operating Safety Buffer target (₹{MONTHLY_SAFETY_BUFFER_TARGET_INR:,.0f}) achieved: "
+                f"₹{mtd_net_profit:,.2f} confirmed post-tax profit this month "
+                f"(after deducting 100% of actual operating expenses [₹{operating_expenses:,.2f}] and ₹{mtd_income_tax:,.2f} in estimated tax). "
                 f"Distributable cash available: {distrib_str}."
+            )
+        elif target_achieved:
+            rec = (
+                f"Base net profit target achieved: ₹{mtd_net_profit:,.2f} confirmed post-tax profit this month "
+                f"(after deducting 100% of actual operating expenses [₹{operating_expenses:,.2f}] and ₹{mtd_income_tax:,.2f} in estimated tax). "
+                f"Safety buffer gap: ₹{buffer_gap:,.2f}. Distributable cash available: {distrib_str}."
             )
         else:
             rec = (
                 f"Current post-tax net profit gap is ₹{gap:,.2f} this month. "
                 f"At your observed {cost_ratio * 100:.1f}% cost ratio, you require approximately "
                 f"₹{monthly_receipts_required:,.2f} in gross collected receipts (ex-GST) to produce "
-                f"₹{monthly_target_inr:,.2f} in take-home profit. "
+                f"₹{monthly_target_inr:,.2f} in take-home profit after deducting 100% of actual business expenses and income tax. "
                 f"This requires delivering approximately {needed_by_tier.get('data_analytics', 0)} Excel packs or "
                 f"{needed_by_tier.get('data_engineering', 0)} ETL pipelines. "
                 f"Distributable cash: {distrib_str}. "
@@ -474,4 +486,6 @@ class NetProfitOptimizer:
             safety_buffer_gap_inr=buffer_gap,
             safety_buffer_jobs_needed=buffer_needed_by_tier,
             accounting_method=cash_res.get("accounting_method", "cash"),
+            is_target_achieved=target_achieved,
+            is_safety_buffer_achieved=safety_buffer_achieved,
         )

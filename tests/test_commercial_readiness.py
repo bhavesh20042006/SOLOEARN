@@ -5,6 +5,7 @@ from pathlib import Path
 import tempfile
 import pandas as pd
 
+import core.config
 from core.commercial_funnel import (
     add_commercial_lead,
     calculate_project_unit_economics,
@@ -18,8 +19,15 @@ from core.db import init_db
 
 class CommercialReadinessTests(unittest.TestCase):
     def setUp(self):
+        self.tmp_dir = tempfile.TemporaryDirectory()
+        self.orig_db_path = core.config.DB_PATH
+        core.config.DB_PATH = Path(self.tmp_dir.name) / "test_commercial.sqlite3"
         init_db()
         init_commercial_tables()
+
+    def tearDown(self):
+        core.config.DB_PATH = self.orig_db_path
+        self.tmp_dir.cleanup()
 
     def test_commercial_lead_lifecycle(self):
         lead_id = add_commercial_lead(
