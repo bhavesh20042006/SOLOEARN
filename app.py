@@ -980,6 +980,7 @@ with tabs[4]:
                             tax_rate=tax_rate,
                             due_days=int(due_days),
                             notes=notes,
+                            require_gst_registration=True,
                         )
                         # Render HTML invoice document
                         html_path = render_invoice_html(inv)

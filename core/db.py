@@ -129,6 +129,7 @@ def init_db() -> None:
                 tax_rate REAL NOT NULL DEFAULT 0.0,
                 tax_amount REAL NOT NULL DEFAULT 0.0,
                 amount_total REAL NOT NULL,
+                amount_paid REAL NOT NULL DEFAULT 0.0,
                 currency TEXT NOT NULL DEFAULT 'INR',
                 status TEXT NOT NULL DEFAULT 'issued',
                 payment_reference TEXT DEFAULT '',
@@ -199,6 +200,8 @@ def init_db() -> None:
                 tds_credits_inr REAL NOT NULL DEFAULT 0.0,
                 gst_threshold_inr REAL NOT NULL DEFAULT 2000000.0,
                 accounting_method TEXT NOT NULL DEFAULT 'cash',
+                is_gst_registered INTEGER NOT NULL DEFAULT 0,
+                gstin TEXT NOT NULL DEFAULT '',
                 is_active INTEGER NOT NULL DEFAULT 1,
                 created_at TEXT NOT NULL
             );
@@ -306,6 +309,10 @@ def init_db() -> None:
             conn.execute("ALTER TABLE expenses ADD COLUMN reviewed_by TEXT DEFAULT ''")
         if "reviewed_at" not in exp_cols:
             conn.execute("ALTER TABLE expenses ADD COLUMN reviewed_at TEXT")
+        inv_cols = [r["name"] for r in conn.execute("PRAGMA table_info(invoices)").fetchall()]
+        if "amount_paid" not in inv_cols:
+            conn.execute("ALTER TABLE invoices ADD COLUMN amount_paid REAL NOT NULL DEFAULT 0.0")
+
         tax_cols = [r["name"] for r in conn.execute("PRAGMA table_info(tax_profiles)").fetchall()]
         if "other_pan_aggregate_turnover_inr" not in tax_cols:
             conn.execute(
@@ -318,6 +325,14 @@ def init_db() -> None:
         if "accounting_method" not in tax_cols:
             conn.execute(
                 "ALTER TABLE tax_profiles ADD COLUMN accounting_method TEXT NOT NULL DEFAULT 'cash'"
+            )
+        if "is_gst_registered" not in tax_cols:
+            conn.execute(
+                "ALTER TABLE tax_profiles ADD COLUMN is_gst_registered INTEGER NOT NULL DEFAULT 0"
+            )
+        if "gstin" not in tax_cols:
+            conn.execute(
+                "ALTER TABLE tax_profiles ADD COLUMN gstin TEXT NOT NULL DEFAULT ''"
             )
 
         # Seed default UPI profile if empty
@@ -826,6 +841,7 @@ def create_invoice(
     task_id: int | None = None,
     due_days: int = 14,
     notes: str = "",
+    require_gst_registration: bool = False,
 ) -> dict[str, Any]:
     client = str(client_name or "").strip()
     if not client:
@@ -852,6 +868,15 @@ def create_invoice(
     tier = str(service_tier or "").strip()
     if tier not in supported_tiers:
         raise ValueError(f"Unsupported service tier: {tier!r}")
+
+    if tax_rate_value > 0 and require_gst_registration:
+        tax_prof = get_active_tax_profile()
+        if tax_prof is None or not bool(tax_prof.get("is_gst_registered", 0)):
+            raise ValueError(
+                "GST collection prohibited: The active business tax profile indicates this business is unregistered for GST "
+                "(Section 32, CGST Act). Unregistered suppliers cannot charge or collect GST. "
+                "Set tax rate to 0.0% or update your Tax Profile with active GST registration and GSTIN."
+            )
 
     tax_amount = round(subtotal * (tax_rate_value / 100.0), 2)
     amount_total = round(subtotal + tax_amount, 2)
@@ -1116,9 +1141,13 @@ def upsert_tax_profile(
     tds_credits_inr: float = 0.0,
     gst_threshold_inr: float = 2000000.0,
     accounting_method: str = "cash",
+    is_gst_registered: bool = False,
+    gstin: str = "",
 ) -> int:
-    """Inserts or updates the active tax profile (supporting Section 276 cash vs mercantile accounting)."""
+    """Inserts or updates the active tax profile (supporting Section 276 cash vs mercantile accounting, and Section 32 GST registration)."""
     acc_method = "mercantile" if str(accounting_method).strip().lower() == "mercantile" else "cash"
+    gst_reg_flag = 1 if bool(is_gst_registered) else 0
+    clean_gstin = str(gstin or "").strip()[:15].upper()
     with connect() as conn:
         conn.execute("UPDATE tax_profiles SET is_active = 0 WHERE is_active = 1")
         cur = conn.execute(
@@ -1126,8 +1155,8 @@ def upsert_tax_profile(
                 profile_name, entity_type, residential_status, tax_year, regime,
                 other_annual_income_inr, other_pan_aggregate_turnover_inr,
                 advance_tax_paid_inr, tds_credits_inr, gst_threshold_inr,
-                accounting_method, is_active, created_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?)""",
+                accounting_method, is_gst_registered, gstin, is_active, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?)""",
             (
                 profile_name[:100],
                 entity_type[:50],
@@ -1140,6 +1169,8 @@ def upsert_tax_profile(
                 max(0.0, float(tds_credits_inr)),
                 max(100000.0, float(gst_threshold_inr)),
                 acc_method,
+                gst_reg_flag,
+                clean_gstin,
                 utc_now(),
             ),
         )

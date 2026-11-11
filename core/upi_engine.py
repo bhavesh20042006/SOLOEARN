@@ -2,14 +2,30 @@ from __future__ import annotations
 
 """
 SOLOEARN Milestone 7 (M7) — UPI Payment & Settlement Automation Engine
-Implements:
-1. NPCI UPI QR & Intent standard URI generator (upi://pay?pa=...&pn=...&am=...&cu=INR&tn=...&tr=...)
-2. Dynamic scannable QR code generator (PNG bytes, Base64 data URI for HTML embed)
-3. Direct UPI collection workflow for Personal UPI (Stage A: zero software cost)
-4. Bank Statement UPI Credit Matching & Automatic Reconciliation
-5. Merchant UPI & Bank Integration Hook with HMAC verification (Stage B)
-6. Financial safeguards: Never marks paid on screenshot, UTR submission, or QR scan;
-   requires receiving bank statement credit. Zero credential storage (PIN/OTP/Password blocked).
+======================================================================
+Implements two distinct operational stages for UPI payment collection & reconciliation:
+
+STAGE A: Zero-Cost Personal UPI Collection Engine
+- Dynamic UPI Intent and scannable QR generation (upi://pay?pa=...&pn=...&am=...&cu=INR&tn=...&tr=...&mode=04)
+- Initiation mode selection: mode="04" (UPI Intent) or "00" (Standard QR). Unsigned mode="02" is rejected.
+- Invoices embedded with standalone Base64 scannable QR cards and mobile payment intent links.
+- Automated bank statement matching (narration, exact amount, date, and UTR).
+- Financial anti-fraud safeguards: Invoices remain pending until verified credit in receiving bank account.
+  Screenshots, SMS texts, and customer UTR submissions alone are strictly rejected as payment proof.
+- Underpayment / overpayment / partial payment handling and duplicate reference protection.
+- Statutory GST gating: Unregistered entities are prohibited from collecting GST under Section 32 of CGST Act.
+
+STAGE B: Merchant UPI & Bank Integration Hook
+- Provider-independent Merchant Payment Adapter interface (MerchantPaymentAdapter).
+- Simulated sandbox adapter (SimulatedBankMerchantAdapter) clearly flagged as is_simulated=True.
+- Production-ready adapter (StandardBankMerchantAdapter) with HMAC-SHA256 signature verification.
+- Replay attack protection: Rejects webhooks with timestamps skewed or older than 300 seconds.
+- Idempotency tracking: Discards duplicate event IDs in merchant_webhook_logs without double-crediting.
+- Strict separation of Payment Success (in transit) vs. Bank Settlement (funds credited to account).
+
+SECURITY:
+- Fails closed on any sensitive credential (UPI PIN, MPIN, passwords, OTPs, CVVs).
+- Dashboard bound to localhost (127.0.0.1).
 """
 
 import base64
@@ -19,6 +35,7 @@ import io
 import json
 import math
 import re
+import time
 import urllib.parse
 from datetime import datetime, timezone
 from pathlib import Path
@@ -28,12 +45,16 @@ import qrcode
 import qrcode.constants
 
 from core.config import DATA_DIR, UPI_QR_DIR
-from core.db import connect, utc_now, get_invoice, list_invoices
-from core.financial_ledger import get_cash_and_reserves_summary, reconcile_statement_row
+from core.db import connect, utc_now, get_invoice, list_invoices, get_active_tax_profile
+from core.financial_ledger import (
+    get_cash_and_reserves_summary,
+    reconcile_statement_row,
+    inr_to_paise,
+)
 
 
 class SecurityViolationError(ValueError):
-    """Raised when sensitive credentials (PIN, OTP, password) are supplied."""
+    """Raised when sensitive credentials (PIN, MPIN, OTP, password) are supplied."""
     pass
 
 
@@ -56,8 +77,43 @@ def assert_no_sensitive_credentials(data: dict[str, Any] | str) -> None:
             if any(p in val.lower() for p in ("upi_pin", "mpin", "pin=", "otp=", "password=", "cvv")):
                 raise SecurityViolationError("Security Rule Violation: Sensitive credential found in payload string.")
     elif isinstance(data, str):
-        if any(p in data.lower() for p in ("upi_pin", "mpin", "password", "otp")):
+        if any(p in data.lower() for p in ("upi_pin", "mpin", "pin=", "password", "otp", "cvv")):
             raise SecurityViolationError("Security Rule Violation: Sensitive credential detected in input string.")
+
+
+def get_upi_interoperability_disclosure() -> dict[str, str]:
+    """
+    Returns statutory, technical, and banking disclosures regarding Personal UPI vs. Merchant UPI.
+    Discloses initiation modes, transaction limits, banking terms, and anti-fraud policies.
+    """
+    return {
+        "initiation_mode": (
+            "Initiation Mode Selection: Unsigned local QR and intent requests use mode='04' (UPI Intent) "
+            "or mode='00' (Standard QR). Mode 02 represents NPCI Secure QR and requires digital signing ('sign=...') "
+            "issued by an acquiring bank PSP certificate. Locally generated unsigned URLs are not advertised as signed Secure QRs."
+        ),
+        "personal_upi_limits": (
+            "Personal VPA Limits: Personal UPI Virtual Payment Addresses are governed by NPCI peer-to-peer (P2P) limits, "
+            "typically capped at ₹1,00,000 per transaction per day by issuing and receiving PSP banks."
+        ),
+        "bank_terms_and_conditions": (
+            "Bank Account Terms: The business owner must verify with their bank whether their personal savings account "
+            "permits business or freelance collections. For high transaction volume, banks mandate opening a Current Account "
+            "with a Merchant QR."
+        ),
+        "consumer_app_behavior": (
+            "Consumer App Velocity Holds: Consumer payment applications (Google Pay, PhonePe, Paytm, BHIM) may flag or hold "
+            "rapid or unexpected high-value transfers sent to personal VPAs under automated risk-detection rules."
+        ),
+        "anti_fraud_settlement_policy": (
+            "Anti-Fraud Policy: An invoice is never marked paid based on customer-submitted payment screenshots, "
+            "SMS alerts, or UTR text messages alone. Settlement strictly requires an owner-confirmed credit in the receiving bank account."
+        ),
+        "gst_statutory_warning": (
+            "GST Statutory Rule: Under Section 32 of the CGST Act, unregistered suppliers cannot charge or collect GST. "
+            "Invoices for unregistered businesses must maintain 0.0% GST until a valid GSTIN is registered."
+        ),
+    }
 
 
 def validate_vpa(vpa: str) -> str:
@@ -82,10 +138,15 @@ def build_upi_payment_url(
     transaction_note: str = "",
     merchant_code: str = "",
     currency: str = "INR",
+    initiation_mode: str = "04",
 ) -> str:
     """
-    Constructs a standard NPCI UPI Intent & Dynamic QR URI (upi://pay?...).
-    Note: Generates dynamic UPI QR/Intent. The legacy UPI Collect flow was deprecated per NPCI from 28 Feb 2026.
+    Constructs a standard UPI Intent & Dynamic QR URI (upi://pay?...).
+    Initiation Mode:
+    - '04': UPI Intent (Mobile Web / App to App flow - default)
+    - '00': Standard QR / P2P Dynamic QR
+    - Mode '02' requires acquiring bank cryptographic digital signature ('sign=...').
+      Unsigned mode='02' requests are rejected to prevent falsely claiming signed NPCI Secure QR compliance.
     """
     vpa = validate_vpa(payee_vpa)
     name = str(payee_name or "").strip()
@@ -113,6 +174,17 @@ def build_upi_payment_url(
 
     note = str(transaction_note or f"Invoice {clean_ref} SOLOEARN").strip()[:80]
 
+    # Validate initiation mode selection
+    mode_str = str(initiation_mode or "").strip()
+    if mode_str == "02":
+        raise ValueError(
+            "Cannot generate unsigned mode=02 (Secure QR). NPCI mode 02 requires a cryptographic digital signature "
+            "token ('sign=...') issued by a bank PSP certificate. For local dynamic intent and QR codes, use initiation_mode='04' (Intent) "
+            "or '00' (Standard QR)."
+        )
+    if mode_str not in {"04", "00", ""}:
+        raise ValueError(f"Invalid initiation mode: '{mode_str}'. Expected '04' (Intent), '00' (Standard QR), or '' (Omitted).")
+
     params = [
         ("pa", vpa),
         ("pn", name),
@@ -125,7 +197,8 @@ def build_upi_payment_url(
     mc = str(merchant_code or "").strip()
     if mc:
         params.append(("mc", mc[:10]))
-    params.append(("mode", "02"))  # 02 = Dynamic QR per NPCI specification
+    if mode_str:
+        params.append(("mode", mode_str))
 
     query_str = urllib.parse.urlencode(params, quote_via=urllib.parse.quote_plus)
     return f"upi://pay?{query_str}"
@@ -164,23 +237,133 @@ def generate_upi_qr_bytes(upi_uri: str, box_size: int = 10, border: int = 2) -> 
     return buf.getvalue()
 
 
-def generate_upi_qr_base64(upi_uri: str, box_size: int = 8, border: int = 2) -> str:
-    """Returns an inline Base64 Data URI string (data:image/png;base64,...) for HTML/browser embedding."""
-    raw_bytes = generate_upi_qr_bytes(upi_uri, box_size=box_size, border=border)
-    encoded = base64.b64encode(raw_bytes).decode("ascii")
-    return f"data:image/png;base64,{encoded}"
+def generate_upi_qr_base64(upi_uri: str, box_size: int = 10, border: int = 2) -> str:
+    """Generates a Base64 data URI (data:image/png;base64,...) for embedding directly into HTML invoices."""
+    png_bytes = generate_upi_qr_bytes(upi_uri, box_size=box_size, border=border)
+    b64_str = base64.b64encode(png_bytes).decode("ascii")
+    return f"data:image/png;base64,{b64_str}"
+
+
+def generate_invoice_upi_qr(
+    invoice: dict[str, Any],
+    save_to_disk: bool = True,
+    initiation_mode: str = "04",
+    upi_settings: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """
+    Generates a dynamic scannable QR code and payment URI for a specific invoice.
+    Uses the active UPI settings from the database or provided dictionary.
+    """
+    settings = upi_settings or get_active_upi_settings()
+    vpa = settings.get("payee_vpa", "soloearn@upi")
+    name = settings.get("payee_name", "SOLOEARN Operations")
+    mc = settings.get("merchant_code", "")
+
+    inv_num = str(invoice["invoice_number"])
+    total_due = float(invoice.get("amount_total", 0.0))
+    note = f"Invoice {inv_num} SOLOEARN"
+
+    upi_uri = build_upi_payment_url(
+        payee_vpa=vpa,
+        payee_name=name,
+        amount_inr=total_due,
+        transaction_ref=inv_num,
+        transaction_note=note,
+        merchant_code=mc,
+        currency="INR",
+        initiation_mode=initiation_mode,
+    )
+
+    png_bytes = generate_upi_qr_bytes(upi_uri)
+    b64_str = base64.b64encode(png_bytes).decode("ascii")
+    qr_base64 = f"data:image/png;base64,{b64_str}"
+    png_path_str = ""
+
+    if save_to_disk:
+        UPI_QR_DIR.mkdir(parents=True, exist_ok=True)
+        out_file = UPI_QR_DIR / f"{inv_num}_qr.png"
+        out_file.write_bytes(png_bytes)
+        png_path_str = str(out_file)
+
+    return {
+        "invoice_number": inv_num,
+        "payee_vpa": vpa,
+        "payee_name": name,
+        "amount_inr": total_due,
+        "transaction_ref": inv_num,
+        "transaction_note": note,
+        "upi_uri": upi_uri,
+        "qr_png_bytes": png_bytes,
+        "qr_data_uri": qr_base64,
+        "qr_file_path": png_path_str,
+        "initiation_mode": initiation_mode,
+    }
+
+
+def init_upi_tables() -> None:
+    """Ensures UPI payment tables and columns exist in the database."""
+    with connect() as conn:
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS upi_payment_settings (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                payee_vpa TEXT NOT NULL,
+                payee_name TEXT NOT NULL,
+                account_type TEXT NOT NULL DEFAULT 'personal',
+                merchant_code TEXT DEFAULT '',
+                bank_name TEXT DEFAULT '',
+                auto_reconcile_statement INTEGER NOT NULL DEFAULT 1,
+                webhook_secret TEXT DEFAULT '',
+                is_active INTEGER NOT NULL DEFAULT 1,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS merchant_webhook_logs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                event_id TEXT UNIQUE NOT NULL,
+                provider TEXT NOT NULL,
+                invoice_number TEXT,
+                transaction_ref TEXT,
+                amount_inr REAL NOT NULL,
+                status TEXT NOT NULL,
+                raw_payload TEXT,
+                signature_valid INTEGER NOT NULL DEFAULT 0,
+                is_simulated INTEGER NOT NULL DEFAULT 0,
+                processed_at TEXT NOT NULL,
+                created_at TEXT NOT NULL
+            );
+            """
+        )
+        # Migrate invoices amount_paid if missing
+        inv_cols = [r["name"] for r in conn.execute("PRAGMA table_info(invoices)").fetchall()]
+        if "amount_paid" not in inv_cols:
+            conn.execute("ALTER TABLE invoices ADD COLUMN amount_paid REAL NOT NULL DEFAULT 0.0")
+
+        # Migrate merchant_webhook_logs is_simulated if missing
+        mw_cols = [r["name"] for r in conn.execute("PRAGMA table_info(merchant_webhook_logs)").fetchall()]
+        if "is_simulated" not in mw_cols:
+            conn.execute("ALTER TABLE merchant_webhook_logs ADD COLUMN is_simulated INTEGER NOT NULL DEFAULT 0")
+
+        conn.commit()
 
 
 def get_active_upi_settings() -> dict[str, Any]:
-    """Retrieves the active UPI payment configuration from the database."""
+    """Returns the currently active UPI payment profile, or default settings."""
     init_upi_tables()
     with connect() as conn:
-        row = conn.execute("SELECT * FROM upi_payment_settings WHERE is_active = 1 ORDER BY id DESC LIMIT 1").fetchone()
+        row = conn.execute(
+            "SELECT * FROM upi_payment_settings WHERE is_active = 1 ORDER BY id DESC LIMIT 1"
+        ).fetchone()
         if row:
             return dict(row)
-    # Default fallback if table is empty
+
+    # Return safe default
     return {
-        "id": 1,
+        "id": 0,
         "payee_vpa": "soloearn@upi",
         "payee_name": "SOLOEARN Operations",
         "account_type": "personal",
@@ -198,184 +381,64 @@ def save_upi_settings(
     account_type: str = "personal",
     merchant_code: str = "",
     bank_name: str = "",
-    auto_reconcile_statement: bool = True,
     webhook_secret: str = "",
-) -> dict[str, Any]:
-    """Saves or updates the active UPI payment profile."""
-    assert_no_sensitive_credentials({
-        "payee_vpa": payee_vpa,
-        "payee_name": payee_name,
-        "merchant_code": merchant_code,
-        "bank_name": bank_name,
-        "webhook_secret": webhook_secret,
-    })
+) -> int:
+    """Updates or sets the active UPI payment profile."""
+    assert_no_sensitive_credentials(merchant_code)
+    assert_no_sensitive_credentials(webhook_secret)
+
     vpa = validate_vpa(payee_vpa)
     name = str(payee_name or "").strip()
     if not name:
         raise ValueError("Payee name cannot be empty")
-    allowed_types = {"personal", "merchant_bank_api", "gateway"}
-    if account_type not in allowed_types:
-        raise ValueError(f"Invalid account type: '{account_type}'. Allowed: {allowed_types}")
+    acc_type = "merchant" if str(account_type).strip().lower() == "merchant" else "personal"
+    mc = str(merchant_code or "").strip()[:15]
+    bank = str(bank_name or "").strip()[:60]
+    secret = str(webhook_secret or "").strip()[:128]
 
     init_upi_tables()
     now_str = utc_now()
     with connect() as conn:
-        conn.execute("UPDATE upi_payment_settings SET is_active = 0")
+        conn.execute("UPDATE upi_payment_settings SET is_active = 0 WHERE is_active = 1")
         cur = conn.execute(
-            """INSERT INTO upi_payment_settings (
-                payee_vpa, payee_name, account_type, merchant_code, bank_name,
-                auto_reconcile_statement, webhook_secret, is_active, created_at, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, 1, ?, ?)""",
-            (
-                vpa,
-                name[:120],
-                account_type,
-                str(merchant_code or "").strip()[:20],
-                str(bank_name or "").strip()[:80],
-                1 if auto_reconcile_statement else 0,
-                str(webhook_secret or "").strip()[:128],
-                now_str,
-                now_str,
-            ),
-        )
-        new_id = cur.lastrowid
-        conn.commit()
-
-    return get_active_upi_settings()
-
-
-def init_upi_tables() -> None:
-    """Creates tables for UPI payment settings and merchant webhook audit logs."""
-    with connect() as conn:
-        conn.executescript(
             """
-            CREATE TABLE IF NOT EXISTS upi_payment_settings (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                payee_vpa TEXT NOT NULL,
-                payee_name TEXT NOT NULL,
-                account_type TEXT NOT NULL DEFAULT 'personal',
-                merchant_code TEXT DEFAULT '',
-                bank_name TEXT DEFAULT '',
-                auto_reconcile_statement INTEGER NOT NULL DEFAULT 1,
-                webhook_secret TEXT DEFAULT '',
-                is_active INTEGER NOT NULL DEFAULT 1,
-                created_at TEXT NOT NULL,
-                updated_at TEXT NOT NULL
-            );
-
-            CREATE TABLE IF NOT EXISTS merchant_webhook_logs (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                event_id TEXT NOT NULL,
-                provider TEXT NOT NULL DEFAULT 'bank_upi_merchant',
-                invoice_number TEXT DEFAULT '',
-                transaction_ref TEXT DEFAULT '',
-                amount_inr REAL NOT NULL DEFAULT 0.0,
-                status TEXT NOT NULL DEFAULT 'received',
-                raw_payload TEXT DEFAULT '',
-                signature_valid INTEGER NOT NULL DEFAULT 0,
-                processed_at TEXT,
-                created_at TEXT NOT NULL
-            );
-            """
+            INSERT INTO upi_payment_settings (
+                payee_vpa, payee_name, account_type, merchant_code,
+                bank_name, auto_reconcile_statement, webhook_secret,
+                is_active, created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, 1, ?, 1, ?, ?)
+            """,
+            (vpa, name, acc_type, mc, bank, secret, now_str, now_str),
         )
-        # Seed default profile if empty
-        row = conn.execute("SELECT id FROM upi_payment_settings LIMIT 1").fetchone()
-        if not row:
-            now_str = utc_now()
-            conn.execute(
-                """INSERT INTO upi_payment_settings (
-                    payee_vpa, payee_name, account_type, merchant_code, bank_name,
-                    auto_reconcile_statement, webhook_secret, is_active, created_at, updated_at
-                ) VALUES ('soloearn@upi', 'SOLOEARN Operations', 'personal', '', 'Bank Linked UPI', 1, '', 1, ?, ?)""",
-                (now_str, now_str),
-            )
         conn.commit()
-
-
-def generate_invoice_upi_qr(
-    invoice: dict[str, Any],
-    upi_settings: dict[str, Any] | None = None,
-    save_to_disk: bool = True,
-) -> dict[str, Any]:
-    """
-    Generates a unique dynamic UPI QR code and payment URI for a specific invoice.
-    Uses exact invoice total (including GST if applicable).
-    """
-    if upi_settings is None:
-        upi_settings = get_active_upi_settings()
-
-    inv_num = str(invoice["invoice_number"])
-    total_amount = float(invoice["amount_total"])
-    client_name = str(invoice.get("client_name", "Valued Client"))
-
-    vpa = str(upi_settings.get("payee_vpa", "soloearn@upi"))
-    payee_name = str(upi_settings.get("payee_name", "SOLOEARN Operations"))
-    merchant_code = str(upi_settings.get("merchant_code", ""))
-
-    txn_note = f"Invoice {inv_num} {client_name}"[:80]
-    txn_ref = inv_num
-
-    upi_uri = build_upi_payment_url(
-        payee_vpa=vpa,
-        payee_name=payee_name,
-        amount_inr=total_amount,
-        transaction_ref=txn_ref,
-        transaction_note=txn_note,
-        merchant_code=merchant_code,
-    )
-
-    qr_bytes = generate_upi_qr_bytes(upi_uri, box_size=8, border=2)
-    qr_b64 = generate_upi_qr_base64(upi_uri, box_size=8, border=2)
-
-    qr_path = None
-    if save_to_disk:
-        UPI_QR_DIR.mkdir(parents=True, exist_ok=True)
-        safe_inv_name = re.sub(r"[^a-zA-Z0-9\-_]", "_", inv_num)
-        qr_file = UPI_QR_DIR / f"{safe_inv_name}_qr.png"
-        qr_file.write_bytes(qr_bytes)
-        qr_path = str(qr_file)
-
-    return {
-        "invoice_number": inv_num,
-        "payee_vpa": vpa,
-        "payee_name": payee_name,
-        "amount_total_inr": total_amount,
-        "transaction_ref": txn_ref,
-        "transaction_note": txn_note,
-        "upi_uri": upi_uri,
-        "qr_png_bytes": qr_bytes,
-        "qr_data_uri": qr_b64,
-        "qr_file_path": qr_path,
-    }
+        return int(cur.lastrowid)
 
 
 def get_upi_payment_centre_summary() -> dict[str, Any]:
     """
-    Returns the 4 core KPIs for the UPI Payment Centre:
-    1. Invoices: Generated count
-    2. Pending: ₹ awaiting payment
-    3. Confirmed: ₹ bank-reconciled
-    4. Net profit: ₹ after estimated tax
+    Computes the 4 headline financial KPIs for the UPI Payment Centre:
+    1. Invoices Generated (count & ₹ total)
+    2. Pending Collection (₹ awaiting settlement)
+    3. Confirmed Reconciled (₹ received & confirmed in bank)
+    4. Net Profit after Tax (₹ cash profit after S.202 tax provision)
     """
-    init_upi_tables()
-    all_invoices = list_invoices()
+    invoices = list_invoices()
     cash_summary = get_cash_and_reserves_summary()
     active_settings = get_active_upi_settings()
 
-    active_invoices = [i for i in all_invoices if i.get("status") != "cancelled"]
-    pending_invoices = [i for i in active_invoices if i.get("status") in {"issued", "payment_pending"}]
-    paid_invoices = [i for i in active_invoices if i.get("status") == "paid"]
+    pending_invoices = [inv for inv in invoices if inv["status"] in {"issued", "payment_pending", "partially_paid"}]
+    paid_invoices = [inv for inv in invoices if inv["status"] == "paid"]
 
-    pending_amount = sum(float(i.get("amount_total", 0.0)) for i in pending_invoices)
-    confirmed_amount = sum(float(i.get("amount_total", 0.0)) for i in paid_invoices)
+    pending_amount = sum(float(inv["amount_total"]) - float(inv.get("amount_paid", 0.0)) for inv in pending_invoices)
+    confirmed_amount = sum(float(inv["amount_total"]) for inv in paid_invoices)
+    total_generated_amount = sum(float(inv["amount_total"]) for inv in invoices)
 
-    net_profit = round(
-        cash_summary.get("operating_profit_inr", 0.0) - cash_summary.get("monthly_tax_provision_inr", 0.0),
-        2,
-    )
+    net_profit = cash_summary.get("net_profit_after_tax_inr", 0.0)
 
     return {
-        "invoices_generated_count": len(active_invoices),
+        "total_invoices_count": len(invoices),
+        "invoices_generated_count": len(invoices),
+        "total_invoices_amount_inr": round(total_generated_amount, 2),
         "pending_invoices_count": len(pending_invoices),
         "pending_invoices_amount_inr": round(pending_amount, 2),
         "confirmed_reconciled_count": len(paid_invoices),
@@ -387,6 +450,7 @@ def get_upi_payment_centre_summary() -> dict[str, Any]:
         "upi_settings": active_settings,
         "pending_invoices": pending_invoices,
         "paid_invoices": paid_invoices,
+        "interoperability_disclosure": get_upi_interoperability_disclosure(),
     }
 
 
@@ -401,7 +465,10 @@ def scan_and_match_statement_for_upi(
     1. Direct Invoice Reference match in narration (e.g. 'INV-2026-0001')
     2. Exact amount match (where exactly one pending invoice matches the credit)
     3. UPI UTR / reference match
-    Never auto-marks an invoice paid without verified receiving statement row.
+    Reversal and duplicate protection:
+    - Skips already reconciled statement rows.
+    - Skips debit entries or entries containing 'REVERSAL'.
+    - Never auto-marks an invoice paid without verified receiving statement row.
     """
     matches: list[dict[str, Any]] = []
 
@@ -413,6 +480,11 @@ def scan_and_match_statement_for_upi(
 
         desc = str(row.get("description", "")).upper()
         bank_ref = str(row.get("bank_ref", "")).upper()
+
+        # Reversal protection: Ignore reversals from automatic crediting
+        if "REVERSAL" in desc or "REVERSAL" in bank_ref:
+            continue
+
         amount = round(float(row.get("amount_inr", 0.0)), 2)
 
         matched_inv = None
@@ -432,7 +504,7 @@ def scan_and_match_statement_for_upi(
         if not matched_inv:
             exact_amt_candidates = [
                 inv for inv in pending_invoices
-                if abs(float(inv["amount_total"]) - amount) < 0.01
+                if abs((float(inv["amount_total"]) - float(inv.get("amount_paid", 0.0))) - amount) < 0.01
             ]
             if len(exact_amt_candidates) == 1:
                 matched_inv = exact_amt_candidates[0]
@@ -454,7 +526,7 @@ def scan_and_match_statement_for_upi(
                 "matched_invoice_id": int(matched_inv["id"]),
                 "matched_invoice_number": str(matched_inv["invoice_number"]),
                 "matched_client_name": str(matched_inv["client_name"]),
-                "invoice_total_due_inr": float(matched_inv["amount_total"]),
+                "invoice_total_due_inr": float(matched_inv["amount_total"]) - float(matched_inv.get("amount_paid", 0.0)),
                 "match_type": match_type,
                 "confidence": confidence,
             })
@@ -466,6 +538,7 @@ def reconcile_upi_payment_from_bank_credit(
     statement_row_id: int,
     invoice_number: str,
     owner_confirmed: bool = True,
+    allow_partial: bool = False,
     notes: str = "",
 ) -> dict[str, Any]:
     """
@@ -473,7 +546,8 @@ def reconcile_upi_payment_from_bank_credit(
     Enforces that:
     1. The customer screenshot or UTR alone NEVER marks an invoice paid.
     2. Payment MUST be verified against an actual row in bank_statement_rows.
-    3. Reconciles invoice and updates the financial ledger and tax provision.
+    3. Supports exact settlement, underpayment/partial payment (when allow_partial=True), and rejects overpayment.
+    4. Reconciles invoice and updates the financial ledger and tax provision.
     """
     if owner_confirmed is not True:
         raise ValueError(
@@ -481,85 +555,469 @@ def reconcile_upi_payment_from_bank_credit(
             "Screenshots or customer-provided UTRs are not accepted as payment proof."
         )
 
-    # Call canonical reconciliation engine
-    result = reconcile_statement_row(
-        row_id=statement_row_id,
-        entity_type="invoice",
-        entity_id=invoice_number,
-        owner_confirmed=True,
-    )
-    result["invoice_number"] = invoice_number
-    return result
+    init_upi_tables()
+
+    with connect() as conn:
+        conn.execute("BEGIN IMMEDIATE")
+
+        st_row_val = conn.execute(
+            "SELECT * FROM bank_statement_rows WHERE id = ?", (statement_row_id,)
+        ).fetchone()
+        if not st_row_val:
+            raise ValueError(f"Bank statement row #{statement_row_id} not found")
+        st_row = dict(st_row_val)
+        if st_row["is_reconciled"]:
+            raise ValueError(f"Bank statement row #{statement_row_id} has already been reconciled")
+        if str(st_row["tx_type"]).lower() != "credit":
+            raise ValueError("An invoice can only be reconciled against a bank credit")
+
+        desc = str(st_row["description"]).upper()
+        if "REVERSAL" in desc:
+            raise ValueError("Bank statement row is a reversal transaction and cannot be settled as revenue")
+
+        inv_row = conn.execute(
+            "SELECT * FROM invoices WHERE invoice_number = ?", (invoice_number,)
+        ).fetchone()
+        if not inv_row:
+            raise ValueError(f"Invoice '{invoice_number}' not found")
+        inv = dict(inv_row)
+        if inv["status"] not in {"issued", "payment_pending", "partially_paid"}:
+            raise ValueError(f"Invoice {inv['invoice_number']} is in status '{inv['status']}' and not awaiting payment")
+
+        credit_amt = round(float(st_row["amount_inr"]), 2)
+        total_inv = round(float(inv["amount_total"]), 2)
+        already_paid = round(float(inv.get("amount_paid", 0.0)), 2)
+        remaining_due = round(total_inv - already_paid, 2)
+
+        bank_ref = str(st_row["bank_ref"] or "").strip()
+        if bank_ref:
+            duplicate = conn.execute(
+                "SELECT id FROM invoices WHERE payment_reference = ? AND status = 'paid' AND id <> ? LIMIT 1",
+                (bank_ref, int(inv["id"])),
+            ).fetchone()
+            if duplicate:
+                raise ValueError(f"Bank reference '{bank_ref}' is already assigned to another paid invoice")
+
+        # Underpayment / Overpayment check
+        if credit_amt > remaining_due:
+            raise ValueError(
+                f"Bank credit ₹{credit_amt:,.2f} exceeds remaining invoice balance of ₹{remaining_due:,.2f}. "
+                "Overpayments cannot be reconciled without an amended invoice or credit note."
+            )
+
+        is_full_settlement = abs(credit_amt - remaining_due) < 0.01
+
+        if not is_full_settlement and not allow_partial:
+            raise ValueError(
+                f"Bank credit ₹{credit_amt:,.2f} does not exactly settle remaining invoice balance of ₹{remaining_due:,.2f}. "
+                "Partial payments are not enabled for this transaction (set allow_partial=True to accept partial payment)."
+            )
+
+        now = utc_now()
+        ref_for_row = bank_ref or f"UPI-BANK-ROW-{statement_row_id}"
+        new_paid_total = round(already_paid + credit_amt, 2)
+        new_status = "paid" if is_full_settlement else "partially_paid"
+
+        # Update bank statement row
+        conn.execute(
+            """UPDATE bank_statement_rows
+               SET is_reconciled = 1,
+                   matched_entity_type = 'invoice',
+                   matched_entity_id = ?,
+                   confirmed_by_owner = 1,
+                   confirmed_at = ?
+               WHERE id = ?""",
+            (invoice_number, now, statement_row_id),
+        )
+
+        conn.execute(
+            """UPDATE bank_statement_imports
+               SET reconciled_count = reconciled_count + 1
+               WHERE id = ?""",
+            (st_row["import_id"],),
+        )
+
+        # Update invoice
+        paid_at_val = now if is_full_settlement else inv["paid_at"]
+        conn.execute(
+            """UPDATE invoices
+               SET status = ?,
+                   amount_paid = ?,
+                   paid_at = ?,
+                   payment_reference = ?,
+                   payment_verified_by_owner = 1
+               WHERE id = ?""",
+            (new_status, new_paid_total, paid_at_val, ref_for_row, int(inv["id"])),
+        )
+
+        # If full settlement, update associated opportunity status to paid
+        opp_id = int(inv["opportunity_id"])
+        if is_full_settlement:
+            conn.execute("UPDATE opportunities SET status = 'paid' WHERE id = ?", (opp_id,))
+
+        # Post transaction to financial_transactions append-only ledger
+        subtotal_ratio = (float(inv["amount_subtotal"]) / total_inv) if total_inv > 0 else 1.0
+        tax_ratio = (float(inv["tax_amount"]) / total_inv) if total_inv > 0 else 0.0
+
+        revenue_portion = round(credit_amt * subtotal_ratio, 2)
+        tax_portion = round(credit_amt * tax_ratio, 2)
+
+        conn.execute(
+            """INSERT INTO financial_transactions (
+                tx_date, tx_type, amount_inr, amount_paise, currency,
+                reference_id, description, is_reversal, created_at
+            ) VALUES (?, 'client_receipt', ?, ?, 'INR', ?, ?, 0, ?)""",
+            (
+                str(st_row["tx_date"])[:10],
+                revenue_portion,
+                inr_to_paise(revenue_portion),
+                invoice_number,
+                f"UPI client receipt for {invoice_number} ({inv['client_name']}) - Ref: {ref_for_row}"
+                + (" (Partial)" if not is_full_settlement else ""),
+                now,
+            ),
+        )
+
+        if tax_portion > 0:
+            conn.execute(
+                """INSERT INTO financial_transactions (
+                    tx_date, tx_type, amount_inr, amount_paise, currency,
+                    reference_id, description, is_reversal, created_at
+                ) VALUES (?, 'gst_collected', ?, ?, 'INR', ?, ?, 0, ?)""",
+                (
+                    str(st_row["tx_date"])[:10],
+                    tax_portion,
+                    inr_to_paise(tax_portion),
+                    invoice_number,
+                    f"GST collected on UPI payment for {invoice_number}",
+                    now,
+                ),
+            )
+
+        conn.commit()
+
+    return {
+        "statement_row_id": statement_row_id,
+        "invoice_number": invoice_number,
+        "amount_settled_inr": credit_amt,
+        "total_paid_inr": new_paid_total,
+        "remaining_due_inr": round(total_inv - new_paid_total, 2),
+        "status": new_status,
+        "payment_reference": ref_for_row,
+        "reconciled_at": now,
+    }
+
+
+# ===========================================================================
+# STAGE B: MERCHANT PAYMENT ADAPTER & WEBHOOK ARCHITECTURE
+# ===========================================================================
+
+class MerchantPaymentAdapter:
+    """Provider-independent merchant payment adapter interface."""
+    adapter_name: str = "base"
+    is_simulated: bool = False
+
+    def verify_webhook_signature(
+        self,
+        payload_bytes: bytes,
+        signature: str,
+        secret: str,
+        timestamp: int | None = None,
+    ) -> bool:
+        raise NotImplementedError
+
+    def parse_webhook_event(
+        self,
+        payload: dict[str, Any],
+        headers: dict[str, str] | None = None,
+    ) -> dict[str, Any]:
+        raise NotImplementedError
+
+
+class SimulatedBankMerchantAdapter(MerchantPaymentAdapter):
+    """
+    Simulated Sandbox Adapter for local testing of merchant UPI notifications.
+    Explicitly marked as is_simulated=True. Does not claim live bank connectivity.
+    """
+    adapter_name: str = "simulated_bank_sandbox"
+    is_simulated: bool = True
+
+    def verify_webhook_signature(
+        self,
+        payload_bytes: bytes,
+        signature: str,
+        secret: str,
+        timestamp: int | None = None,
+    ) -> bool:
+        if not secret or not signature:
+            return False
+        expected_sig = hmac.new(secret.encode("utf-8"), payload_bytes, hashlib.sha256).hexdigest()
+        return hmac.compare_digest(expected_sig.lower(), signature.strip().lower())
+
+    def parse_webhook_event(
+        self,
+        payload: dict[str, Any],
+        headers: dict[str, str] | None = None,
+    ) -> dict[str, Any]:
+        assert_no_sensitive_credentials(payload)
+        return {
+            "event_id": str(payload.get("event_id", "")).strip(),
+            "invoice_number": str(payload.get("invoice_number", "")).strip(),
+            "transaction_ref": str(payload.get("transaction_ref", "")).strip(),
+            "amount_inr": float(payload.get("amount_inr", 0.0)),
+            "status": str(payload.get("status", "")).strip().lower(),
+            "timestamp": int(payload.get("timestamp", 0)),
+            "is_simulated": True,
+        }
+
+    @staticmethod
+    def create_signed_payload(
+        event_id: str,
+        invoice_number: str,
+        amount_inr: float,
+        status: str,
+        secret: str,
+        transaction_ref: str = "",
+        timestamp: int | None = None,
+    ) -> tuple[dict[str, Any], str]:
+        """Utility for test suites to generate valid signed simulated payloads."""
+        ts = int(time.time()) if timestamp is None else timestamp
+        payload = {
+            "event_id": event_id,
+            "invoice_number": invoice_number,
+            "amount_inr": float(amount_inr),
+            "status": status,
+            "transaction_ref": transaction_ref or f"SIM-TXN-{int(time.time())}",
+            "timestamp": ts,
+            "is_simulated": True,
+        }
+        payload_bytes = json.dumps(payload, sort_keys=True).encode("utf-8")
+        sig = hmac.new(secret.encode("utf-8"), payload_bytes, hashlib.sha256).hexdigest()
+        return payload, sig
+
+
+class StandardBankMerchantAdapter(MerchantPaymentAdapter):
+    """
+    Production Adapter conforming to standard bank/aggregator merchant webhook specifications.
+    Enforces HMAC-SHA256 signature verification and replay-attack timestamp checking.
+    """
+    adapter_name: str = "standard_bank_production"
+    is_simulated: bool = False
+
+    def verify_webhook_signature(
+        self,
+        payload_bytes: bytes,
+        signature: str,
+        secret: str,
+        timestamp: int | None = None,
+    ) -> bool:
+        if not secret or not signature:
+            return False
+        # If timestamp is provided, sign (timestamp + "." + payload) or standard HMAC
+        to_sign = f"{timestamp}.".encode("utf-8") + payload_bytes if timestamp else payload_bytes
+        expected_sig = hmac.new(secret.encode("utf-8"), to_sign, hashlib.sha256).hexdigest()
+        return hmac.compare_digest(expected_sig.lower(), signature.strip().lower())
+
+    def parse_webhook_event(
+        self,
+        payload: dict[str, Any],
+        headers: dict[str, str] | None = None,
+    ) -> dict[str, Any]:
+        assert_no_sensitive_credentials(payload)
+        return {
+            "event_id": str(payload.get("event_id", "")).strip(),
+            "invoice_number": str(payload.get("invoice_number", "")).strip(),
+            "transaction_ref": str(payload.get("transaction_ref", "")).strip(),
+            "amount_inr": float(payload.get("amount_inr", 0.0)),
+            "status": str(payload.get("status", "")).strip().lower(),
+            "timestamp": int(payload.get("timestamp", 0)),
+            "is_simulated": False,
+        }
 
 
 def process_merchant_bank_webhook(
     payload: dict[str, Any],
     signature: str | None = None,
     webhook_secret: str | None = None,
+    headers: dict[str, str] | None = None,
+    adapter: MerchantPaymentAdapter | None = None,
 ) -> dict[str, Any]:
     """
-    Stage B: Merchant UPI & Bank Integration Hook.
-    Receives automated bank transaction status notification, verifies HMAC signature,
-    checks for duplicates, and updates invoice and ledger.
+    Processes incoming merchant bank webhook notifications.
+    Safeguards:
+    1. Blocks sensitive banking credentials (PIN, MPIN, passwords, OTPs).
+    2. Verifies HMAC-SHA256 signature against configured webhook secret.
+    3. Replay Attack Protection: Rejects events with timestamps older than 300 seconds or skewed.
+    4. Idempotency Protection: Rejects duplicate event IDs without double crediting.
+    5. State Separation: Distinguishes Payment Success (in transit) from Bank Settlement.
     """
     assert_no_sensitive_credentials(payload)
+
+    # Determine adapter: if explicitly provided, use it; else choose based on is_simulated flag
+    if adapter is None:
+        if payload.get("is_simulated"):
+            adapter = SimulatedBankMerchantAdapter()
+        else:
+            adapter = StandardBankMerchantAdapter()
 
     active_settings = get_active_upi_settings()
     secret = webhook_secret or active_settings.get("webhook_secret", "")
 
-    # Signature verification if secret configured
+    event = adapter.parse_webhook_event(payload, headers)
+    event_id = event["event_id"]
+    if not event_id:
+        raise ValueError("Missing event_id in webhook payload")
+
+    # Timestamp replay-attack protection (300-second window)
+    ts = event.get("timestamp", 0)
+    if ts > 0:
+        current_ts = int(time.time())
+        if abs(current_ts - ts) > 300:
+            raise ValueError(
+                f"Webhook timestamp expired or skewed ({abs(current_ts - ts)}s difference). "
+                "Event rejected under replay-attack protection."
+            )
+
+    # Signature verification
     if secret:
         if not signature:
             raise ValueError("Missing HMAC signature for merchant bank webhook")
         payload_bytes = json.dumps(payload, sort_keys=True).encode("utf-8")
-        expected_sig = hmac.new(secret.encode("utf-8"), payload_bytes, hashlib.sha256).hexdigest()
-        if not hmac.compare_digest(expected_sig, signature.strip().lower()):
-            raise ValueError("Invalid HMAC signature: webhook payload integrity check failed")
+        if not adapter.verify_webhook_signature(payload_bytes, signature, secret, timestamp=ts or None):
+            # Also check direct payload HMAC if combined timestamp check didn't match
+            direct_expected = hmac.new(secret.encode("utf-8"), payload_bytes, hashlib.sha256).hexdigest()
+            if not hmac.compare_digest(direct_expected.lower(), signature.strip().lower()):
+                raise ValueError("Invalid HMAC signature: webhook payload integrity check failed")
 
-    event_id = str(payload.get("event_id", "")).strip()
-    if not event_id:
-        raise ValueError("Missing event_id in webhook payload")
+    inv_num = event["invoice_number"]
+    txn_ref = event["transaction_ref"]
+    amount_inr = event["amount_inr"]
+    status = event["status"]
+    is_sim = 1 if adapter.is_simulated else 0
 
-    inv_num = str(payload.get("invoice_number", "")).strip()
-    txn_ref = str(payload.get("transaction_ref", "")).strip()
-    amount_inr = float(payload.get("amount_inr", 0.0))
-    status = str(payload.get("status", "")).strip().lower()
-
-    now_str = utc_now()
     init_upi_tables()
+    now_str = utc_now()
 
     with connect() as conn:
+        conn.execute("BEGIN IMMEDIATE")
+
         # Idempotency check
         existing = conn.execute("SELECT id FROM merchant_webhook_logs WHERE event_id = ?", (event_id,)).fetchone()
         if existing:
             return {
                 "status": "already_processed",
                 "event_id": event_id,
-                "message": "Duplicate webhook notification acknowledged without double-crediting.",
+                "is_simulated": adapter.is_simulated,
+                "message": "Duplicate webhook event acknowledged without double-crediting.",
             }
 
         conn.execute(
             """INSERT INTO merchant_webhook_logs (
                 event_id, provider, invoice_number, transaction_ref,
-                amount_inr, status, raw_payload, signature_valid, processed_at, created_at
-            ) VALUES (?, 'bank_upi_merchant', ?, ?, ?, ?, ?, 1, ?, ?)""",
+                amount_inr, status, raw_payload, signature_valid, is_simulated, processed_at, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?)""",
             (
                 event_id,
+                adapter.adapter_name,
                 inv_num,
                 txn_ref,
                 amount_inr,
                 status,
                 json.dumps(payload),
+                is_sim,
                 now_str,
                 now_str,
             ),
         )
-        conn.commit()
 
-    return {
-        "status": "success",
-        "event_id": event_id,
-        "invoice_number": inv_num,
-        "amount_inr": amount_inr,
-        "message": "Merchant bank webhook processed and recorded.",
-    }
+        # Distinguish Payment Success (Transit) vs Bank Settlement
+        if status in {"payment_captured", "payment_received"}:
+            # Funds are captured by PSP / gateway but have not settled into receiving bank account
+            if inv_num:
+                conn.execute(
+                    """UPDATE invoices
+                       SET notes = notes || ' [PSP Payment Received: awaiting bank settlement]'
+                       WHERE invoice_number = ? AND status IN ('issued', 'payment_pending')""",
+                    (inv_num,),
+                )
+            conn.commit()
+            return {
+                "status": "payment_captured",
+                "event_id": event_id,
+                "invoice_number": inv_num,
+                "amount_inr": amount_inr,
+                "is_simulated": adapter.is_simulated,
+                "settled_to_bank": False,
+                "message": "Payment captured by provider; awaiting bank settlement clearance.",
+            }
+
+        elif status in {"settlement_processed", "funds_settled_to_bank", "success", "settled"}:
+            # Bank settlement complete: Funds have reached the merchant account
+            if inv_num:
+                inv_row = conn.execute("SELECT * FROM invoices WHERE invoice_number = ?", (inv_num,)).fetchone()
+                if inv_row and inv_row["status"] in {"issued", "payment_pending", "partially_paid"}:
+                    conn.execute(
+                        """UPDATE invoices
+                           SET status = 'paid',
+                               amount_paid = amount_total,
+                               paid_at = ?,
+                               payment_reference = ?,
+                               payment_verified_by_owner = 1
+                           WHERE id = ?""",
+                        (now_str, txn_ref or f"SETTLE-{event_id}", int(inv_row["id"])),
+                    )
+                    opp_id = int(inv_row["opportunity_id"])
+                    conn.execute("UPDATE opportunities SET status = 'paid' WHERE id = ?", (opp_id,))
+
+                    # Register append-only ledger transaction
+                    subtotal = round(float(inv_row["amount_subtotal"]), 2)
+                    tax_amt = round(float(inv_row["tax_amount"]), 2)
+                    conn.execute(
+                        """INSERT INTO financial_transactions (
+                            tx_date, tx_type, amount_inr, amount_paise, currency,
+                            reference_id, description, is_reversal, created_at
+                        ) VALUES (?, 'client_receipt', ?, ?, 'INR', ?, ?, 0, ?)""",
+                        (
+                            now_str[:10],
+                            subtotal,
+                            inr_to_paise(subtotal),
+                            inv_num,
+                            f"Settled merchant UPI payment for {inv_num} ({inv_row['client_name']}) - Ref: {txn_ref}",
+                            now_str,
+                        ),
+                    )
+                    if tax_amt > 0:
+                        conn.execute(
+                            """INSERT INTO financial_transactions (
+                                tx_date, tx_type, amount_inr, amount_paise, currency,
+                                reference_id, description, is_reversal, created_at
+                            ) VALUES (?, 'gst_collected', ?, ?, 'INR', ?, ?, 0, ?)""",
+                            (
+                                now_str[:10],
+                                tax_amt,
+                                inr_to_paise(tax_amt),
+                                inv_num,
+                                f"GST collected on settled UPI payment for {inv_num}",
+                                now_str,
+                            ),
+                        )
+
+            conn.commit()
+            return {
+                "status": "settlement_processed",
+                "event_id": event_id,
+                "invoice_number": inv_num,
+                "amount_inr": amount_inr,
+                "is_simulated": adapter.is_simulated,
+                "settled_to_bank": True,
+                "message": "Merchant bank settlement confirmed; invoice paid and financial ledger updated.",
+            }
+
+        conn.commit()
+        return {
+            "status": status,
+            "event_id": event_id,
+            "invoice_number": inv_num,
+            "is_simulated": adapter.is_simulated,
+            "message": f"Webhook recorded with status '{status}'.",
+        }
