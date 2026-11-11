@@ -14,12 +14,15 @@ from core.commercial_funnel import (
     REAL_SMB_PILOT_TARGETS,
     add_commercial_lead,
     calculate_project_unit_economics,
+    confirm_launch_checklist_item,
     get_100_point_scorecard,
     get_5_approval_gates_status,
+    get_commercial_launch_checklist,
     get_commercial_performance_dashboard,
     get_commercial_pilot_milestones,
     get_commercial_validation_dashboard,
     get_funnel_metrics,
+    get_launch_checklist_summary,
     init_commercial_tables,
     list_commercial_leads,
     list_outreach_interactions,
@@ -133,6 +136,7 @@ from core.scoring import opportunity_score, score_label
 st.set_page_config(page_title="SOLOEARN — Private AI Workbench", page_icon="🧠", layout="wide")
 ensure_directories()
 init_db()
+init_commercial_tables()
 
 st.title("🧠 SOLOEARN")
 st.caption("SOLOEARN v0.6.1.2 · private, local-first income-workflow workbench · single owner · zero paid API dependency")
@@ -259,7 +263,7 @@ with tabs[1]:
             f"| **3. Delivery Quality & Customer Satisfaction** | 20.0 pts | **{scorecard['pillars'][2]['score']} pts** | 4 service offerings & automated QA ready; pending live client signoff (+4 pts) & revision rate (+4 pts) |\n"
             f"| **4. Accurate Financial Accounting & Profitability** | 20.0 pts | **{scorecard['pillars'][3]['score']} pts** | Multi-account ledger & Tax 2025 verified; pending ₹25k+ bank receipts (+3 pts) & ₹50k+ profit (+3 pts) |\n"
             f"| **5. Safe Automation with Human Approval** | 10.0 pts | **{scorecard['pillars'][4]['score']} pts** | 5 Human Approval Gates strictly enforced in database & code |\n"
-            f"| **6. Indian Business, Banking, Tax & Data Compliance** | 10.0 pts | **{scorecard['pillars'][5]['score']} pts** | Udyam MSME, Kotak Safalta ₹5k AQB guide, Mode 01 UPI QR, DPDP principles |\n"
+            f"| **6. Indian Business, Banking, Tax & Data Compliance** | 10.0 pts | **{scorecard['pillars'][5]['score']} pts** | Udyam MSME (NIC 62011/62020/63111; 63112 conditional), Kotak Safalta ₹5k AQB (Neo scheme), RBI 2-doc KYC, Mode 01 QR, Advance liability reserve |\n"
             f"| **TOTAL COMMERCIAL SCORE** | **100.0 pts** | **{scorecard['total_score']} pts** | **Verified Baseline ({scorecard['completion_pct']}% Ready)** |"
         )
         st.caption("Note: Reaching 100/100 does not require more software code. It requires executing the pilot outreach, booking 3 discovery calls, securing the first ₹5,000 paying customer, and verifying bank receipt.")
@@ -274,6 +278,62 @@ with tabs[1]:
                 f"  - **Rule:** {g['rule']}\n"
                 f"  - **Enforcement:** `{g['enforcement_point']}` · Approved: `{g['approved_count']}` | Pending: `{g['pending_count']}`"
             )
+
+    # Expandable Commercial Launch Gate M7.0.2 Checklist (7 Owner Confirmations)
+    launch_summary = get_launch_checklist_summary()
+    with st.expander(f"🚦 Commercial Launch Gate M7.0.2 Checklist ({launch_summary['owner_confirmed_count']}/{launch_summary['total_items']} Owner Confirmed · {launch_summary['code_tested_count']}/7 Code-Tested)", expanded=True):
+        st.markdown(
+            "**Operational Launch Gate Standard:** Automated tests prove the software algorithms function; they do **not** prove that a bank account is active, "
+            "that Kotak.biz is approved, or that a customer has paid you. Before live payment collection or commercial launch, the owner must explicitly confirm "
+            "each real-world milestone."
+        )
+        l_col1, l_col2, l_col3 = st.columns(3)
+        l_col1.metric("Code-Tested Infrastructure", f"{launch_summary['code_tested_count']} / {launch_summary['total_items']}", "100% Sandbox Verified")
+        l_col2.metric("Externally Verified & Confirmed", f"{launch_summary['owner_confirmed_count']} / {launch_summary['total_items']}", "Owner Signed Off")
+        l_col3.metric("Pending Real-World Proof", f"{launch_summary['pending_count']} / {launch_summary['total_items']}", "Requires External Action")
+
+        st.divider()
+
+        checklist_items = launch_summary["items"]
+        for item in checklist_items:
+            c_header_col, c_status_col = st.columns([3, 1])
+            with c_header_col:
+                st.markdown(f"#### Step {item['step_number']}: {item['title']} (`{item['category']}`)")
+            with c_status_col:
+                if item["owner_confirmed"]:
+                    st.success("✅ CONFIRMED")
+                else:
+                    st.warning("🟡 PENDING PROOF")
+
+            st.caption(f"**Verification Type:** `{item['verification_type']}` | **Code Status:** ✅ {item['code_test_details']}")
+            st.info(f"**Operational Instruction:** {item['instruction_guide']}")
+
+            ec1, ec2, ec3 = st.columns([2, 1, 1])
+            with ec1:
+                ev_input = st.text_input(
+                    f"Evidence / Reference Note (e.g. Account #, UTR, Signoff Date)",
+                    value=item.get("evidence_notes", "") or "",
+                    key=f"launch_ev_{item['item_key']}",
+                )
+            with ec2:
+                is_conf = st.checkbox(
+                    "Owner Confirmed",
+                    value=bool(item.get("owner_confirmed", 0)),
+                    key=f"launch_chk_{item['item_key']}",
+                )
+            with ec3:
+                st.write("")
+                if st.button("Save Confirmation", key=f"save_btn_{item['item_key']}"):
+                    confirm_launch_checklist_item(
+                        item_key=item["item_key"],
+                        owner_confirmed=is_conf,
+                        evidence_notes=ev_input,
+                    )
+                    st.rerun()
+
+            if item.get("confirmed_at"):
+                st.caption(f"Last Confirmed: {item['confirmed_at']} · Evidence: {item.get('evidence_notes', 'None recorded')}")
+            st.markdown("---")
 
     # 14 Commercial Validation Metrics Dashboard
     st.markdown("### 📊 Commercial Validation Dashboard (14 Unvarnished Metrics)")
@@ -303,6 +363,12 @@ with tabs[1]:
     cp_dash = get_commercial_performance_dashboard(include_sandbox=include_sandbox)
     v15.metric("Owner Hours Invested", f"{cp_dash['owner_hours']} hrs", "Across 5 categories")
     v16.metric("Pipeline Reconciled Paid", f"₹{val_dash['approval_gates'][2]['approved_count']} rows", "Bank-verified entries")
+
+    adv_liability = metrics.get("customer_advance_liability_inr", 0.0)
+    if adv_liability > 0:
+        st.warning(f"⚠️ **Customer Advance Liability Reserve:** ₹{adv_liability:,.2f} is held as an unearned obligation to clients. It is NOT recognized as earned turnover or owner take-home profit.")
+    else:
+        st.caption("🛡️ **Customer Advance Separation:** ₹0.00 unearned advance liabilities. All cash received represents fully delivered, reconciled client receipts.")
 
     with st.expander("🚀 M6.3 First Commercial Experiment: 5 Genuine Businesses (Click to View Outreach Scripts)"):
         st.markdown(
@@ -1679,15 +1745,26 @@ with tabs[6]:
         with st.expander("🏛️ Kotak Mahindra Bank Pilot Setup & Udyam Guide"):
             kotak_info = get_kotak_onboarding_guide()
             st.markdown(
-                f"**Recommended Account:** `{kotak_info['recommended_account']}`\n\n"
+                f"**Recommended Account:** `{kotak_info['recommended_account']}` (`{kotak_info['account_scheme']}`)\n\n"
                 f"• **AQB Requirement:** ₹{kotak_info['average_quarterly_balance_inr']:,.2f} average quarterly balance.\n"
                 f"• **Shortfall Fees:** ₹500/quarter if balance is ₹2.5k–₹5k; ₹1,000/quarter if below ₹2.5k.\n"
-                f"• **Merchant App:** `{kotak_info['kotak_biz_specs']['app_name']}` ({kotak_info['kotak_biz_specs']['installation_charges']}).\n"
-                f"• **Free Udyam Registration:** [{kotak_info['udyam_portal_url']}]({kotak_info['udyam_portal_url']})\n\n"
+                f"• **Initial Deposit vs AQB:** {kotak_info['aqb_vs_opening_deposit']['distinction']}\n"
+                f"  ⚠️ *{kotak_info['aqb_vs_opening_deposit']['approval_disclaimer']}*\n\n"
+                f"• **RBI 2-Document KYC Rule for Sole Proprietors:**\n"
+                f"  - {kotak_info['rbi_kyc_rules']['accepted_documents'][0]}\n"
+                f"  - {kotak_info['rbi_kyc_rules']['accepted_documents'][1]}\n"
+                f"  ⚠️ *{kotak_info['rbi_kyc_rules']['bank_discretion_warning']}*\n\n"
+                f"• **Merchant App:** `{kotak_info['kotak_biz_specs']['app_name']}` ({kotak_info['kotak_biz_specs']['installation_charges']})\n"
+                f"  - **Activation Status:** `{kotak_info['kotak_biz_specs']['activation_status']}`\n\n"
+                f"• **Customer Advances vs AQB Trap:**\n"
+                f"  - {kotak_info['customer_advances_accounting']['accounting_principle']}\n"
+                f"  ⚠️ *{kotak_info['customer_advances_accounting']['aqb_trap_warning']}*\n\n"
+                f"• **Free Udyam Registration:** [{kotak_info['udyam_portal_url']}]({kotak_info['udyam_portal_url']}) ({kotak_info['udyam_fee']})\n\n"
                 "**Exact NIC Codes for Udyam:**\n"
-                "- `62011`: Writing / automation scripts & computer programs\n"
-                "- `62020`: Data analytics consulting & business intelligence\n"
-                "- `63112`: Data processing, ETL & Excel data cleansing\n\n"
+                "- `62011`: Custom software programming (Writing, modifying, testing of automation scripts / Python ETL)\n"
+                "- `62020`: Computer consultancy (IT and data consultancy solutions)\n"
+                "- `63111`: **Data processing, including report writing** (Primary & essential for analytics/reporting)\n"
+                "- `63112`: Web hosting (*Conditional only: Do NOT register unless SOLOEARN actually offers web hosting*)\n\n"
                 "**4 Questions to Ask Kotak Branch:**\n"
                 + "\n".join(f"- {q}" for q in kotak_info["four_questions_for_kotak_branch"])
             )

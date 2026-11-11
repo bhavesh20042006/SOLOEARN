@@ -86,7 +86,7 @@ def run_m7_local_preflight(verbose: bool = False) -> dict[str, Any]:
             "skill_match": 0.95,
             "payment_confidence": 0.95,
             "risk_level": 1.0,
-        }, score=9.5)
+        }, score=9.5, is_sandbox=True)
 
         with connect() as conn:
             conn.execute("UPDATE opportunities SET status='submitted_by_owner' WHERE id=?", (opp_id,))
@@ -97,6 +97,7 @@ def run_m7_local_preflight(verbose: bool = False) -> dict[str, Any]:
             workspace="workspaces/preflight",
             opportunity_id=opp_id,
             notes="Stage A commercial pilot deliverable",
+            is_sandbox=True,
         )
 
         data_dir = Path("data")
@@ -111,7 +112,7 @@ def run_m7_local_preflight(verbose: bool = False) -> dict[str, Any]:
                 (str(fake_zip), task_id),
             )
 
-        # Issue pilot invoice for ₹5,000
+        # Issue pilot invoice for ₹5,000 (isolated as sandbox)
         inv = create_invoice(
             opportunity_id=opp_id,
             client_name="Acme D2C Pilot Client",
@@ -120,6 +121,7 @@ def run_m7_local_preflight(verbose: bool = False) -> dict[str, Any]:
             tax_rate=0.0,
             task_id=task_id,
             require_gst_registration=True,
+            is_sandbox=True,
         )
         inv_num = inv["invoice_number"]
 
@@ -263,8 +265,11 @@ Sl No,Transaction Date,Description / Narration,Chq / Ref No.,Amount,Dr / Cr,Bala
     finally:
         with connect() as conn:
             if inv_num:
-                conn.execute("DELETE FROM invoices WHERE invoice_number=?", (inv_num,))
                 conn.execute("DELETE FROM financial_transactions WHERE reference_id=?", (inv_num,))
+                conn.execute("DELETE FROM invoices WHERE invoice_number=?", (inv_num,))
+            if opp_id:
+                conn.execute("DELETE FROM revenue WHERE opportunity_id=?", (opp_id,))
+                conn.execute("DELETE FROM proposals WHERE opportunity_id=?", (opp_id,))
             if task_id:
                 conn.execute("DELETE FROM tasks WHERE id=?", (task_id,))
             if opp_id:
@@ -278,43 +283,79 @@ def get_kotak_onboarding_guide() -> dict[str, Any]:
     """
     Returns structured, official onboarding guidance for Kotak Mahindra Bank
     Safalta Current Account, Udyam Registration, and Kotak.biz merchant activation.
+    Incorporates RBI Master Directions on KYC, statutory distinctions, and customer advance accounting.
     """
     return {
         "bank_name": "Kotak Mahindra Bank",
         "recommended_account": "Kotak Safalta Current Account",
+        "account_scheme": "Neo Current Account Scheme (Safalta variant)",
         "average_quarterly_balance_inr": 5000.0,
         "aqb_shortfall_charges": {
             "above_or_equal_5000": "₹0 (No shortfall charge)",
             "between_2500_and_4999": "₹500 per quarter",
             "below_2500": "₹1,000 per quarter",
         },
-        "alternative_account": "Kotak Neo Current Account (₹10,000 AQB)",
-        "udyam_portal_url": "https://udyamregistration.gov.in/",
-        "udyam_fee": "₹0 (Completely free Govt. portal — do not pay agents)",
-        "recommended_nic_codes": [
-            {
-                "code": "62011",
-                "activity": "Writing, modifying, testing of computer programs (Automation scripts, Python ETL pipelines)",
-            },
-            {
-                "code": "62020",
-                "activity": "Computer consultancy activities (Data analytics consulting, business intelligence solutions)",
-            },
-            {
-                "code": "63112",
-                "activity": "Data processing, hosting and related activities (Excel data cleansing, financial reconciliation)",
-            },
-        ],
-        "four_questions_for_kotak_branch": [
-            "1. Can I open a Current Account as an individual / sole proprietor providing online data analytics, Excel automation, and ETL services?",
-            "2. Is the Safalta Current Account with ₹5,000 AQB (Average Quarterly Balance) available for my business activity?",
-            "3. Will you accept my Udyam Registration Certificate as one proof of business activity under RBI Master Directions on KYC? What second document is required (e.g., Shop & Establishment, Bank Statement, or CA certificate)?",
-            "4. Once the Current Account is active, can I immediately activate Kotak.biz for merchant UPI QR and payment collection? What are the merchant UPI transaction charges?",
-        ],
+        "aqb_vs_opening_deposit": {
+            "distinction": "Initial account-opening deposit (the initial cheque/funds required to open the account) is distinct from Average Quarterly Balance (AQB).",
+            "aqb_explanation": "AQB is the daily closing balance averaged over all days in each calendar quarter (90 days). Maintaining ₹5,000 AQB avoids shortfall charges.",
+            "approval_disclaimer": "Maintaining or intending to maintain ₹5,000 AQB does NOT guarantee account approval by Kotak branch.",
+        },
+        "rbi_kyc_rules": {
+            "rule_summary": "Under RBI Master Directions on KYC for commercial banks, opening a sole proprietorship current account generally requires TWO documents proving business activity in the entity's name.",
+            "accepted_documents": [
+                "Document 1: Udyam Registration Certificate (Free official MSME portal).",
+                "Document 2: Second business proof such as Shop & Establishment certificate, GST registration (if applicable), utility bill in business name, or Chartered Accountant (CA) certificate.",
+            ],
+            "bank_discretion_warning": "While banks have regulatory discretion to accept one document after physical verification/inspection, Kotak branches commonly request two documents. Your existing Kotak personal savings account assists with personal identity KYC but DOES NOT guarantee business current account approval.",
+        },
         "kotak_biz_specs": {
             "app_name": "Kotak.biz",
             "installation_charges": "₹0 (Zero setup / zero rental)",
             "supported_modes": "Dynamic UPI QR, Static UPI QR, Payment Links, Intent Links",
             "eligibility": "Kotak Current Account holders (Sole Proprietors & Individuals)",
+            "activation_status": "PENDING (Requires active approved current account; do not claim activated prior to bank approval)",
         },
+        "customer_advances_accounting": {
+            "accounting_principle": "Customer advances are NOT earned revenue. Under Indian accounting principles, an advance is an unearned liability (an obligation to deliver agreed services or issue a refund).",
+            "aqb_trap_warning": "Do NOT assume a ₹2,500 customer advance automatically satisfies the ₹5,000 AQB requirement. ₹2,500 is below the ₹5,000 threshold (attracting ₹500/quarter penalty), and advance money belongs to the client until deliverables are accepted.",
+            "revenue_recognition": "Advances are held as liabilities and converted to earned revenue only upon formal deliverable acceptance and invoice settlement.",
+        },
+        "udyam_portal_url": "https://udyamregistration.gov.in/",
+        "udyam_fee": "₹0 (Completely free Govt. portal — do not pay private agents)",
+        "recommended_nic_codes": [
+            {
+                "code": "62011",
+                "name": "Custom software programming",
+                "activity": "Writing, modifying, testing of computer programs (Automation scripts, Python ETL pipelines)",
+                "appropriateness": "Appropriate if you provide custom programming, automation, or script development.",
+                "status": "RECOMMENDED",
+            },
+            {
+                "code": "62020",
+                "name": "Computer consultancy",
+                "activity": "Consultancy on computer systems and software (Data analytics consulting, BI solution architecture)",
+                "appropriateness": "Appropriate if you provide IT and data consultancy services.",
+                "status": "RECOMMENDED",
+            },
+            {
+                "code": "63111",
+                "name": "Data processing, including report writing",
+                "activity": "Data processing, tabulating, spreadsheet consolidation, automated report writing, and ETL transformations",
+                "appropriateness": "Essential & most relevant for data analytics, data cleansing, and business reporting.",
+                "status": "PRIMARY_RECOMMENDED",
+            },
+            {
+                "code": "63112",
+                "name": "Web hosting",
+                "activity": "Web hosting and streaming services",
+                "appropriateness": "Conditional only: Do NOT register 63112 unless SOLOEARN genuinely provides client web hosting services.",
+                "status": "CONDITIONAL_ONLY",
+            },
+        ],
+        "four_questions_for_kotak_branch": [
+            "1. Can I open a Safalta Current Account (₹5,000 AQB under Neo scheme) as an individual / sole proprietor providing data analytics and data processing services?",
+            "2. What is the required initial account-opening cheque/deposit amount, and what are the specific charges if AQB falls below ₹5,000 (e.g. ₹500/quarter for ₹2.5k–₹5k, ₹1,000/quarter below ₹2.5k)?",
+            "3. Under RBI Master Directions on KYC, will you accept my Udyam Registration Certificate as one proof of business activity, and what specific second document does your branch require (e.g., Shop & Establishment, CA certificate)?",
+            "4. Once the Current Account is approved, what is the onboarding process and timeline to activate Kotak.biz for merchant UPI QR and payment links? What are the merchant UPI settlement terms?",
+        ],
     }

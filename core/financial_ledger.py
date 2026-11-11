@@ -26,6 +26,9 @@ DEFAULT_WORKING_CAPITAL_BUFFER_INR = 25000.0
 
 VALID_LEDGER_TX_TYPES = {
     "client_receipt",
+    "customer_advance",           # Customer advance received (unearned liability)
+    "customer_advance_applied",   # Advance converted to earned client receipt upon work acceptance
+    "customer_advance_refunded",  # Advance refunded to client
     "platform_fee",
     "refund",  # Client refund excluding GST; use gst_refund for the tax component.
     "gst_refund",
@@ -251,6 +254,119 @@ def list_ledger_transactions(limit: int = 100, tx_type: str = "", include_sandbo
     with connect() as conn:
         rows = conn.execute(query, params).fetchall()
         return [dict(r) for r in rows]
+
+
+# ---------------------------------------------------------------------------
+# 1B. CUSTOMER ADVANCE LIABILITY & UNEARNED REVENUE ACCOUNTING
+# ---------------------------------------------------------------------------
+
+def record_customer_advance(
+    amount_inr: float,
+    client_name: str,
+    reference_id: str = "",
+    description: str = "",
+    tx_date: str = "",
+    is_sandbox: bool = False,
+) -> int:
+    """
+    Records an advance payment received from a prospective or active client.
+    CRITICAL: Customer advances are unearned liabilities / obligations under Indian accounting.
+    They increase reconciled bank cash once cleared, but create an equal unearned liability reserve.
+    Customer advances are strictly NOT recognized as earned turnover, operating profit, or distributable profit
+    until services are fully delivered, invoiced, and accepted by the client.
+    """
+    desc = description or f"Customer advance from {client_name}"
+    return record_ledger_transaction(
+        tx_type="customer_advance",
+        amount_inr=amount_inr,
+        description=desc,
+        reference_id=reference_id,
+        tx_date=tx_date,
+        is_sandbox=is_sandbox,
+    )
+
+
+def apply_customer_advance(
+    advance_tx_id: int,
+    invoice_number: str,
+    amount_inr: float,
+    description: str = "",
+    tx_date: str = "",
+    is_sandbox: bool = False,
+) -> int:
+    """
+    Applies a previously received customer advance towards a completed, accepted invoice.
+    Reduces the unearned customer advance liability and recognizes earned client_receipt revenue.
+    """
+    desc = description or f"Applied customer advance towards invoice {invoice_number}"
+    applied_tx_id = record_ledger_transaction(
+        tx_type="customer_advance_applied",
+        amount_inr=amount_inr,
+        description=desc,
+        reference_id=invoice_number,
+        tx_date=tx_date,
+        linked_tx_id=advance_tx_id,
+        is_sandbox=is_sandbox,
+    )
+    record_ledger_transaction(
+        tx_type="client_receipt",
+        amount_inr=amount_inr,
+        description=f"Earned revenue from applied advance: {invoice_number}",
+        reference_id=invoice_number,
+        tx_date=tx_date,
+        linked_tx_id=applied_tx_id,
+        is_sandbox=is_sandbox,
+    )
+    return applied_tx_id
+
+
+def refund_customer_advance(
+    advance_tx_id: int,
+    amount_inr: float,
+    reason: str,
+    reference_id: str = "",
+    tx_date: str = "",
+    owner_confirmed: bool = False,
+    is_sandbox: bool = False,
+) -> int:
+    """
+    Refunds an unearned customer advance back to the client.
+    Requires explicit human owner confirmation under Approval Gate 4.
+    """
+    if not owner_confirmed:
+        raise ValueError("Advance refund requires explicit owner_confirmed=True under Gate 4")
+    desc = f"Refund of customer advance: {reason}"
+    return record_ledger_transaction(
+        tx_type="customer_advance_refunded",
+        amount_inr=amount_inr,
+        description=desc,
+        reference_id=reference_id,
+        tx_date=tx_date,
+        linked_tx_id=advance_tx_id,
+        is_sandbox=is_sandbox,
+    )
+
+
+def get_customer_advance_liability(include_sandbox: bool = False) -> float:
+    """
+    Returns the net outstanding unearned customer advance liability in INR.
+    Liability = customer_advance - customer_advance_applied - customer_advance_refunded
+    """
+    where_clauses = ["tx_type IN ('customer_advance', 'customer_advance_applied', 'customer_advance_refunded')"]
+    if not include_sandbox:
+        where_clauses.append("(is_sandbox = 0 OR is_sandbox IS NULL)")
+    where_sql = "WHERE " + " AND ".join(where_clauses)
+    with connect() as conn:
+        rows = conn.execute(
+            f"""SELECT tx_type, SUM(amount_inr) FROM financial_transactions
+               {where_sql}
+               GROUP BY tx_type"""
+        ).fetchall()
+        sums = {r[0]: float(r[1] or 0.0) for r in rows}
+        adv_in = sums.get("customer_advance", 0.0)
+        adv_app = sums.get("customer_advance_applied", 0.0)
+        adv_ref = sums.get("customer_advance_refunded", 0.0)
+        return max(0.0, round(adv_in - adv_app - adv_ref, 2))
 
 
 # ---------------------------------------------------------------------------
@@ -659,7 +775,7 @@ def reconcile_statement_row(
     if owner_confirmed is not True:
         raise ValueError("Reconciliation requires explicit owner verification checkbox")
 
-    allowed_entities = {"invoice", "expense", "owner_draw", "tax_payment", "gst_payment", "other"}
+    allowed_entities = {"invoice", "expense", "owner_draw", "tax_payment", "gst_payment", "other", "customer_advance"}
     if entity_type not in allowed_entities:
         raise ValueError(f"Invalid matched entity type: '{entity_type}'")
 
@@ -731,6 +847,10 @@ def reconcile_statement_row(
         elif entity_type in {"owner_draw", "tax_payment", "gst_payment"}:
             if tx_direction != "debit":
                 raise ValueError(f"{entity_type} can only be reconciled against a bank debit")
+
+        elif entity_type == "customer_advance":
+            if tx_direction != "credit":
+                raise ValueError("A customer advance can only be reconciled against a bank credit")
 
         # Validation succeeded; now atomically mark the row and increment its import count.
         conn.execute(
@@ -848,6 +968,23 @@ def reconcile_statement_row(
                     (
                         str(st_row["tx_date"])[:10], tx_t, amount, inr_to_paise(amount),
                         exp_ref, f"Paid expense {exp['vendor']} ({exp['category']})", is_sb, now,
+                    ),
+                )
+
+        elif entity_type == "customer_advance":
+            existing = conn.execute(
+                "SELECT id FROM financial_transactions WHERE reference_id=? AND tx_type='customer_advance'",
+                (ref_for_row,),
+            ).fetchone()
+            if not existing:
+                conn.execute(
+                    """INSERT INTO financial_transactions (
+                        tx_date, tx_type, amount_inr, amount_paise, currency,
+                        reference_id, description, is_reversal, is_sandbox, created_at
+                    ) VALUES (?, 'customer_advance', ?, ?, 'INR', ?, ?, 0, 0, ?)""",
+                    (
+                        str(st_row["tx_date"])[:10], amount, inr_to_paise(amount),
+                        ref_for_row, f"Reconciled customer advance: {st_row['description']}", now,
                     ),
                 )
 
@@ -996,10 +1133,15 @@ def get_cash_and_reserves_summary(
         tx_sums = {r["tx_type"]: float(r["total_inr"] or 0.0) for r in txs}
 
         all_collected_receipts = tx_sums.get("client_receipt", 0.0)
+        customer_advance_in = tx_sums.get("customer_advance", 0.0)
+        customer_advance_applied = tx_sums.get("customer_advance_applied", 0.0)
+        customer_advance_refunded = tx_sums.get("customer_advance_refunded", 0.0)
+        customer_advance_liability = max(0.0, round(customer_advance_in - customer_advance_applied - customer_advance_refunded, 2))
+
         gst_collected = tx_sums.get("gst_collected", 0.0)
         gst_paid = tx_sums.get("gst_paid", 0.0)
         tax_payments = tx_sums.get("tax_payment", 0.0)
-        refunds_paid = tx_sums.get("refund", 0.0) + tx_sums.get("gst_refund", 0.0)
+        refunds_paid = tx_sums.get("refund", 0.0) + tx_sums.get("gst_refund", 0.0) + customer_advance_refunded
         gst_refunds = tx_sums.get("gst_refund", 0.0)
         owner_draws = tx_sums.get("owner_draw", 0.0)
         platform_fees = tx_sums.get("platform_fee", 0.0)
@@ -1030,7 +1172,7 @@ def get_cash_and_reserves_summary(
 
         # Bank balance calculation
         if bank_balance_known:
-            total_cash_in = all_collected_receipts + gst_collected + other_cash_in
+            total_cash_in = all_collected_receipts + customer_advance_in + gst_collected + other_cash_in
             total_cash_out = paid_expenses + refunds_paid + owner_draws + tax_payments + platform_fees + gst_paid + other_cash_out
             bank_balance = round(opening_balance + total_cash_in - total_cash_out, 2)
         else:
@@ -1061,7 +1203,7 @@ def get_cash_and_reserves_summary(
 
         if bank_balance_known and bank_balance is not None:
             distributable_cash = round(
-                bank_balance - gst_liability_reserve - income_tax_reserve - unpaid_bills - buffer_reserve, 2
+                bank_balance - gst_liability_reserve - income_tax_reserve - unpaid_bills - buffer_reserve - customer_advance_liability, 2
             )
             is_solvent = distributable_cash >= 0.0
         else:
@@ -1071,6 +1213,7 @@ def get_cash_and_reserves_summary(
     return {
         "bank_balance_known": bank_balance_known,
         "bank_balance_inr": bank_balance,
+        "customer_advance_liability_inr": customer_advance_liability,
         "collected_receipts_inr": round(collected_receipts, 2),
         "total_operating_expenses_inr": round(total_operating_expenses, 2),
         "deductible_operating_expenses_inr": round(deductible_operating_expenses, 2),

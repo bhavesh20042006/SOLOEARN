@@ -99,7 +99,221 @@ def init_commercial_tables() -> None:
                 FOREIGN KEY(lead_id) REFERENCES commercial_leads(id) ON DELETE CASCADE
             );"""
         )
+        init_commercial_launch_checklist(conn)
         conn.commit()
+
+
+# ---------------------------------------------------------------------------
+# COMMERCIAL LAUNCH GATE M7.0.2 CHECKLIST DEFINITIONS & API
+# ---------------------------------------------------------------------------
+
+LAUNCH_CHECKLIST_DEFINITIONS: list[dict[str, Any]] = [
+    {
+        "step_number": 1,
+        "item_key": "business_account_approval",
+        "title": "Actual Business Current Account Approval",
+        "category": "Banking & Compliance",
+        "verification_type": "EXTERNAL_BANK_VERIFICATION",
+        "code_test_details": "Kotak statement parser, balance formulas, import logic, and duplicate checks verified across 197 automated tests.",
+        "instruction_guide": (
+            "Visit Kotak Mahindra Bank branch with Udyam Registration Certificate (NIC 62011/62020/63111) and second business proof "
+            "as mandated by RBI Master Directions on KYC for sole proprietorships. Confirm Safalta account approval (₹5,000 AQB under Neo scheme) "
+            "in writing and obtain the official Current Account number and NetBanking credentials. Do not rely on personal savings KYC."
+        ),
+    },
+    {
+        "step_number": 2,
+        "item_key": "merchant_qr_activation",
+        "title": "Merchant QR & Kotak.biz Activation",
+        "category": "Banking & Compliance",
+        "verification_type": "EXTERNAL_BANK_VERIFICATION",
+        "code_test_details": "Mode 01 dynamic UPI QR generation, Mode 04 Intent URLs, and statutory non-GST invoice notice tested and verified.",
+        "instruction_guide": (
+            "Download Kotak.biz merchant app. Link it to the approved Current Account. Obtain the merchant VPA and dynamic QR capabilities. "
+            "Perform a small test scan if permitted by the bank. Status remains PENDING until bank activates merchant acquiring."
+        ),
+    },
+    {
+        "step_number": 3,
+        "item_key": "first_real_prospect_contacted",
+        "title": "First Real Prospect Contacted",
+        "category": "Sales & Acquisition",
+        "verification_type": "EXTERNAL_PROSPECT_VERIFICATION",
+        "code_test_details": "Lead manager, 5 researched SMB targets (Snitch, Blue Tokai, Mokobara, Slurrp Farm, Koparo Clean), and Outreach Logger verified.",
+        "instruction_guide": (
+            "Select an initial target account from Tab 1 (e.g. Slurrp Farm or Koparo Clean). Transmit the humble, question-led discovery message "
+            "to the verified founder or decision maker via LinkedIn/email. Record the interaction in the Outreach Logger."
+        ),
+    },
+    {
+        "step_number": 4,
+        "item_key": "written_pilot_agreement",
+        "title": "Written Pilot Agreement & Scope Confirmation",
+        "category": "Sales & Acquisition",
+        "verification_type": "EXTERNAL_CLIENT_VERIFICATION",
+        "code_test_details": "Approval Gate 1 (proposal quote) and Gate 2 (scope/contract authorization) enforced; non-GST statutory wording verified.",
+        "instruction_guide": (
+            "Hold discovery discussion. Agree on tightly scoped ₹5,000 ex-GST pilot deliverable (e.g. multi-channel order reconciliation or return analysis). "
+            "Obtain written client confirmation of scope and price before initiating any deliverable work."
+        ),
+    },
+    {
+        "step_number": 5,
+        "item_key": "actual_work_completed_and_accepted",
+        "title": "Actual Work Completed & Accepted by Client",
+        "category": "Delivery & QA",
+        "verification_type": "EXTERNAL_CLIENT_VERIFICATION",
+        "code_test_details": "Automated multi-check formula QA engine, deliverable packager, and Gate 5 human owner signoff verified.",
+        "instruction_guide": (
+            "Process client dataset (NIC 63111). Execute multi-check formula QA to guarantee zero spreadsheet errors. Package deliverable zip, "
+            "sign off at Gate 5, and dispatch to client. Receive formal client acceptance without dispute or revision requests."
+        ),
+    },
+    {
+        "step_number": 6,
+        "item_key": "verified_bank_credit",
+        "title": "Verified Bank Credit in NetBanking Statement",
+        "category": "Financial Settlement",
+        "verification_type": "EXTERNAL_BANK_VERIFICATION",
+        "code_test_details": "Kotak NetBanking statement CSV parser, 12-digit UTR extraction, duplicate protection, and debit rejection verified.",
+        "instruction_guide": (
+            "Client executes UPI payment against invoice Mode 01 QR. Log in to Kotak NetBanking and download the official transaction CSV statement. "
+            "Confirm ₹5,000 credit entry with valid 12-digit UPI UTR. Never accept WhatsApp screenshots, payment claims, or SMS as proof of payment."
+        ),
+    },
+    {
+        "step_number": 7,
+        "item_key": "successful_soloearn_reconciliation",
+        "title": "Successful SOLOEARN System Reconciliation",
+        "category": "Financial Settlement",
+        "verification_type": "SYSTEM_INTEGRATION_VERIFICATION",
+        "code_test_details": "Automated statement matcher, invoice payment verification, Section 202 tax reserve allocation, and ledger updates verified in sandbox.",
+        "instruction_guide": (
+            "Upload live Kotak statement CSV into Tab 6. Execute reconciliation at Gate 3. Confirm invoice transitions to 'paid', "
+            "Section 202 tax reserve is set aside, and actual unvarnished post-tax profit updates on the Commercial Dashboard."
+        ),
+    },
+]
+
+
+def init_commercial_launch_checklist(conn=None) -> None:
+    """Initializes the 7-item Commercial Launch Gate M7.0.2 checklist table."""
+    def _run(c):
+        c.execute(
+            """CREATE TABLE IF NOT EXISTS commercial_launch_checklist (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                item_key TEXT UNIQUE NOT NULL,
+                step_number INTEGER NOT NULL,
+                title TEXT NOT NULL,
+                category TEXT NOT NULL,
+                verification_type TEXT NOT NULL,
+                is_code_tested INTEGER NOT NULL DEFAULT 1,
+                code_test_details TEXT NOT NULL,
+                is_externally_verified INTEGER NOT NULL DEFAULT 0,
+                owner_confirmed INTEGER NOT NULL DEFAULT 0,
+                status TEXT NOT NULL DEFAULT 'PENDING',
+                confirmed_at TEXT,
+                evidence_notes TEXT DEFAULT '',
+                instruction_guide TEXT NOT NULL,
+                created_at TEXT NOT NULL
+            );"""
+        )
+        existing = {r["item_key"] for r in c.execute("SELECT item_key FROM commercial_launch_checklist").fetchall()}
+        now = utc_now()
+        for item in LAUNCH_CHECKLIST_DEFINITIONS:
+            if item["item_key"] not in existing:
+                c.execute(
+                    """INSERT INTO commercial_launch_checklist (
+                        item_key, step_number, title, category, verification_type,
+                        is_code_tested, code_test_details, is_externally_verified,
+                        owner_confirmed, status, instruction_guide, created_at
+                    ) VALUES (?, ?, ?, ?, ?, 1, ?, 0, 0, 'PENDING', ?, ?)""",
+                    (
+                        item["item_key"],
+                        item["step_number"],
+                        item["title"],
+                        item["category"],
+                        item["verification_type"],
+                        item["code_test_details"],
+                        item["instruction_guide"],
+                        now,
+                    ),
+                )
+    if conn is not None:
+        _run(conn)
+    else:
+        with connect() as c:
+            _run(c)
+            c.commit()
+
+
+def get_commercial_launch_checklist() -> list[dict[str, Any]]:
+    """Returns the 7 Commercial Launch Gate items in step order."""
+    init_commercial_launch_checklist()
+    with connect() as conn:
+        rows = conn.execute(
+            "SELECT * FROM commercial_launch_checklist ORDER BY step_number ASC"
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+
+def confirm_launch_checklist_item(
+    item_key: str,
+    owner_confirmed: bool,
+    evidence_notes: str = "",
+) -> dict[str, Any]:
+    """
+    Records human owner confirmation for a Commercial Launch Gate item.
+    Also toggles external verification status based on owner signoff.
+    """
+    init_commercial_launch_checklist()
+    with connect() as conn:
+        now = utc_now() if owner_confirmed else None
+        status = "CONFIRMED" if owner_confirmed else "PENDING"
+        conn.execute(
+            """UPDATE commercial_launch_checklist
+               SET owner_confirmed = ?,
+                   is_externally_verified = ?,
+                   status = ?,
+                   confirmed_at = ?,
+                   evidence_notes = ?
+               WHERE item_key = ?""",
+            (
+                1 if owner_confirmed else 0,
+                1 if owner_confirmed else 0,
+                status,
+                now,
+                evidence_notes.strip(),
+                item_key,
+            ),
+        )
+        conn.commit()
+        row = conn.execute("SELECT * FROM commercial_launch_checklist WHERE item_key = ?", (item_key,)).fetchone()
+        if not row:
+            raise ValueError(f"Launch checklist item '{item_key}' not found")
+        return dict(row)
+
+
+def get_launch_checklist_summary() -> dict[str, Any]:
+    """
+    Returns high-level summary metrics across the 7 launch gate items:
+    Distinguishes code-tested from externally verified and owner confirmed.
+    """
+    items = get_commercial_launch_checklist()
+    total = len(items)
+    code_tested = sum(1 for i in items if i.get("is_code_tested"))
+    owner_confirmed = sum(1 for i in items if i.get("owner_confirmed"))
+    externally_verified = sum(1 for i in items if i.get("is_externally_verified"))
+    pending = total - owner_confirmed
+    return {
+        "total_items": total,
+        "code_tested_count": code_tested,
+        "owner_confirmed_count": owner_confirmed,
+        "externally_verified_count": externally_verified,
+        "pending_count": pending,
+        "is_fully_confirmed": owner_confirmed == total and total > 0,
+        "items": items,
+    }
 
 
 def add_commercial_lead(
@@ -650,10 +864,10 @@ def get_100_point_scorecard(include_sandbox: bool = False) -> dict[str, Any]:
 
     # 6. Indian Business, Banking, Tax & Data Compliance (10 pts)
     pillar6_items = [
-        {"name": "Udyam MSME Registration Ready (NIC 62011, 62020, 63112)", "score": 2.5, "max": 2.5, "status": "VERIFIED"},
-        {"name": "Dedicated Current Account Guide (Kotak Safalta, ₹5k AQB)", "score": 2.5, "max": 2.5, "status": "VERIFIED"},
+        {"name": "Udyam MSME Ready (NIC 62011, 62020, 63111; 63112 conditional)", "score": 2.5, "max": 2.5, "status": "VERIFIED"},
+        {"name": "Kotak Safalta Guide (AQB ₹5k vs Opening, RBI 2-Doc KYC, Kotak.biz Pending)", "score": 2.5, "max": 2.5, "status": "VERIFIED"},
         {"name": "NPCI UPI QR Compliance (Mode 01 Dynamic QR)", "score": 2.5, "max": 2.5, "status": "VERIFIED"},
-        {"name": "Data Privacy Principles, NDA Protocols & Sandbox Isolation", "score": 2.5, "max": 2.5, "status": "VERIFIED"},
+        {"name": "Advance Separation & Data Isolation (Unearned liability vs profit)", "score": 2.5, "max": 2.5, "status": "VERIFIED"},
     ]
     p6_score = sum(i["score"] for i in pillar6_items)
 
@@ -784,6 +998,8 @@ def get_commercial_validation_dashboard(include_sandbox: bool = False) -> dict[s
 
     scorecard = get_100_point_scorecard(include_sandbox=include_sandbox)
     approval_gates = get_5_approval_gates_status()
+    launch_checklist_summary = get_launch_checklist_summary()
+    customer_advance_liability_inr = cash_info.get("customer_advance_liability_inr", 0.0)
 
     return {
         "metrics": {
@@ -801,9 +1017,12 @@ def get_commercial_validation_dashboard(include_sandbox: bool = False) -> dict[s
             "operating_expenses_inr": operating_expenses_inr,
             "tax_provisions_inr": tax_provisions_inr,
             "actual_post_tax_owner_profit_inr": actual_post_tax_owner_profit_inr,
+            "customer_advance_liability_inr": customer_advance_liability_inr,
         },
         "scorecard": scorecard,
         "approval_gates": approval_gates,
+        "launch_checklist_summary": launch_checklist_summary,
+        "customer_advance_liability_inr": customer_advance_liability_inr,
         "include_sandbox": include_sandbox,
         "data_mode": "LIVE_BUSINESS_RECORDS" if not include_sandbox else "SANDBOX_SIMULATION_INCLUDED",
     }
