@@ -88,9 +88,14 @@ def get_upi_interoperability_disclosure() -> dict[str, str]:
     """
     return {
         "initiation_mode": (
-            "Initiation Mode Selection: Unsigned local QR and intent requests use mode='04' (UPI Intent) "
-            "or mode='00' (Standard QR). Mode 02 represents NPCI Secure QR and requires digital signing ('sign=...') "
-            "issued by an acquiring bank PSP certificate. Locally generated unsigned URLs are not advertised as signed Secure QRs."
+            "UPI Initiation Mode Standards: NPCI specifies exact initiation mode mappings:\n"
+            "• Mode 00: Default transaction\n"
+            "• Mode 01: QR code (used for standard scannable QR generation)\n"
+            "• Mode 02: Secure QR code (mandates digital signature 'sign=...' from bank PSP certificate)\n"
+            "• Mode 04: Intent (used for mobile web-to-app deep links)\n"
+            "• Mode 05: Secure Intent (mandates digital signature 'sign=...')\n"
+            "Unsigned local QR generation uses Mode 01 (QR code) for scannable images and Mode 04 (Intent) for mobile payment buttons. "
+            "Locally generated unsigned codes are never labelled as signed Secure QR codes (Mode 02/05)."
         ),
         "personal_upi_limits": (
             "Personal VPA Limits: Personal UPI Virtual Payment Addresses are governed by NPCI peer-to-peer (P2P) limits, "
@@ -111,7 +116,7 @@ def get_upi_interoperability_disclosure() -> dict[str, str]:
         ),
         "gst_statutory_warning": (
             "GST Statutory Rule: Under Section 32 of the CGST Act, unregistered suppliers cannot charge or collect GST. "
-            "Invoices for unregistered businesses must maintain 0.0% GST until a valid GSTIN is registered."
+            "Invoices for unregistered businesses must state 'GST not charged — Supplier is not registered under GST.'"
         ),
     }
 
@@ -142,11 +147,15 @@ def build_upi_payment_url(
 ) -> str:
     """
     Constructs a standard UPI Intent & Dynamic QR URI (upi://pay?...).
-    Initiation Mode:
-    - '04': UPI Intent (Mobile Web / App to App flow - default)
-    - '00': Standard QR / P2P Dynamic QR
-    - Mode '02' requires acquiring bank cryptographic digital signature ('sign=...').
-      Unsigned mode='02' requests are rejected to prevent falsely claiming signed NPCI Secure QR compliance.
+    Initiation Mode Mapping (per NPCI & PSP Integration Standards):
+    - '00': Default transaction
+    - '01': QR code (Standard Dynamic/Static QR)
+    - '02': Secure QR code (Requires acquiring-bank cryptographic digital signature 'sign=...')
+    - '04': Intent (UPI Mobile Web / App-to-App flow - default for interactive links)
+    - '05': Secure Intent (Requires acquiring-bank cryptographic digital signature 'sign=...')
+
+    Unsigned requests attempting to use '02' (Secure QR code) or '05' (Secure Intent)
+    are strictly rejected to prevent falsely claiming signed secure compliance.
     """
     vpa = validate_vpa(payee_vpa)
     name = str(payee_name or "").strip()
@@ -174,16 +183,19 @@ def build_upi_payment_url(
 
     note = str(transaction_note or f"Invoice {clean_ref} SOLOEARN").strip()[:80]
 
-    # Validate initiation mode selection
+    # Validate initiation mode selection per NPCI standards
     mode_str = str(initiation_mode or "").strip()
-    if mode_str == "02":
+    if mode_str in {"02", "05"}:
+        mode_label = "Secure QR code (mode 02)" if mode_str == "02" else "Secure Intent (mode 05)"
         raise ValueError(
-            "Cannot generate unsigned mode=02 (Secure QR). NPCI mode 02 requires a cryptographic digital signature "
-            "token ('sign=...') issued by a bank PSP certificate. For local dynamic intent and QR codes, use initiation_mode='04' (Intent) "
-            "or '00' (Standard QR)."
+            f"Cannot generate unsigned {mode_label}. Secure UPI initiation modes mandate an acquiring bank "
+            "cryptographic digital signature ('sign=...') issued by a registered PSP certificate. "
+            "For unsigned dynamic requests, use initiation_mode='01' (QR code) or '04' (Intent), or '00' (Default transaction)."
         )
-    if mode_str not in {"04", "00", ""}:
-        raise ValueError(f"Invalid initiation mode: '{mode_str}'. Expected '04' (Intent), '00' (Standard QR), or '' (Omitted).")
+    if mode_str not in {"00", "01", "04", ""}:
+        raise ValueError(
+            f"Invalid initiation mode: '{mode_str}'. Expected '01' (QR code), '04' (Intent), '00' (Default transaction), or '' (Omitted)."
+        )
 
     params = [
         ("pa", vpa),
@@ -247,12 +259,12 @@ def generate_upi_qr_base64(upi_uri: str, box_size: int = 10, border: int = 2) ->
 def generate_invoice_upi_qr(
     invoice: dict[str, Any],
     save_to_disk: bool = True,
-    initiation_mode: str = "04",
+    initiation_mode: str = "01",
     upi_settings: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """
-    Generates a dynamic scannable QR code and payment URI for a specific invoice.
-    Uses the active UPI settings from the database or provided dictionary.
+    Generates a dynamic scannable QR code (Mode 01: QR code) and payment intent URI (Mode 04: Intent)
+    for a specific invoice. Uses the active UPI settings from the database or provided dictionary.
     """
     settings = upi_settings or get_active_upi_settings()
     vpa = settings.get("payee_vpa", "soloearn@upi")
@@ -263,7 +275,9 @@ def generate_invoice_upi_qr(
     total_due = float(invoice.get("amount_total", 0.0))
     note = f"Invoice {inv_num} SOLOEARN"
 
-    upi_uri = build_upi_payment_url(
+    # Scannable QR URI uses Mode 01 (QR code per NPCI standards)
+    qr_mode = initiation_mode if initiation_mode in {"00", "01"} else "01"
+    qr_upi_uri = build_upi_payment_url(
         payee_vpa=vpa,
         payee_name=name,
         amount_inr=total_due,
@@ -271,10 +285,22 @@ def generate_invoice_upi_qr(
         transaction_note=note,
         merchant_code=mc,
         currency="INR",
-        initiation_mode=initiation_mode,
+        initiation_mode=qr_mode,
     )
 
-    png_bytes = generate_upi_qr_bytes(upi_uri)
+    # Clickable Intent URI for mobile devices uses Mode 04 (Intent)
+    intent_upi_uri = build_upi_payment_url(
+        payee_vpa=vpa,
+        payee_name=name,
+        amount_inr=total_due,
+        transaction_ref=inv_num,
+        transaction_note=note,
+        merchant_code=mc,
+        currency="INR",
+        initiation_mode="04",
+    )
+
+    png_bytes = generate_upi_qr_bytes(qr_upi_uri)
     b64_str = base64.b64encode(png_bytes).decode("ascii")
     qr_base64 = f"data:image/png;base64,{b64_str}"
     png_path_str = ""
@@ -292,11 +318,12 @@ def generate_invoice_upi_qr(
         "amount_inr": total_due,
         "transaction_ref": inv_num,
         "transaction_note": note,
-        "upi_uri": upi_uri,
+        "upi_uri": qr_upi_uri,
+        "intent_uri": intent_upi_uri,
         "qr_png_bytes": png_bytes,
         "qr_data_uri": qr_base64,
         "qr_file_path": png_path_str,
-        "initiation_mode": initiation_mode,
+        "initiation_mode": qr_mode,
     }
 
 
@@ -490,6 +517,7 @@ def scan_and_match_statement_for_upi(
         matched_inv = None
         match_type = ""
         confidence = 0.0
+        is_ambiguous = False
 
         # Check 1: Invoice number in narration or bank_ref
         for inv in pending_invoices:
@@ -513,8 +541,9 @@ def scan_and_match_statement_for_upi(
             elif len(exact_amt_candidates) > 1:
                 # Multiple invoices with same amount - require manual owner selection
                 matched_inv = exact_amt_candidates[0]
-                match_type = "multiple_candidates_same_amount"
-                confidence = 0.50
+                match_type = "ambiguous_multiple_candidates_same_amount"
+                confidence = 0.40
+                is_ambiguous = True
 
         if matched_inv:
             matches.append({
@@ -529,6 +558,7 @@ def scan_and_match_statement_for_upi(
                 "invoice_total_due_inr": float(matched_inv["amount_total"]) - float(matched_inv.get("amount_paid", 0.0)),
                 "match_type": match_type,
                 "confidence": confidence,
+                "is_ambiguous": is_ambiguous,
             })
 
     return matches
@@ -710,12 +740,14 @@ def reconcile_upi_payment_from_bank_credit(
 
 # ===========================================================================
 # STAGE B: MERCHANT PAYMENT ADAPTER & WEBHOOK ARCHITECTURE
+# (INTEGRATION FRAMEWORK — NOT CONNECTED TO LIVE BANK)
 # ===========================================================================
 
 class MerchantPaymentAdapter:
     """Provider-independent merchant payment adapter interface."""
     adapter_name: str = "base"
     is_simulated: bool = False
+    connection_status: str = "NOT CONNECTED"
 
     def verify_webhook_signature(
         self,
@@ -737,10 +769,13 @@ class MerchantPaymentAdapter:
 class SimulatedBankMerchantAdapter(MerchantPaymentAdapter):
     """
     Simulated Sandbox Adapter for local testing of merchant UPI notifications.
-    Explicitly marked as is_simulated=True. Does not claim live bank connectivity.
+    Explicitly marked as is_simulated=True.
+    CONNECTION STATUS: NOT CONNECTED (LOCAL SANDBOX SIMULATOR ONLY).
+    Does not claim live bank connectivity.
     """
     adapter_name: str = "simulated_bank_sandbox"
     is_simulated: bool = True
+    connection_status: str = "NOT CONNECTED (Sandbox Simulator Only)"
 
     def verify_webhook_signature(
         self,
@@ -768,6 +803,7 @@ class SimulatedBankMerchantAdapter(MerchantPaymentAdapter):
             "status": str(payload.get("status", "")).strip().lower(),
             "timestamp": int(payload.get("timestamp", 0)),
             "is_simulated": True,
+            "connection_status": self.connection_status,
         }
 
     @staticmethod
@@ -798,11 +834,16 @@ class SimulatedBankMerchantAdapter(MerchantPaymentAdapter):
 
 class StandardBankMerchantAdapter(MerchantPaymentAdapter):
     """
-    Production Adapter conforming to standard bank/aggregator merchant webhook specifications.
-    Enforces HMAC-SHA256 signature verification and replay-attack timestamp checking.
+    Standard Bank Merchant Adapter Interface.
+    IMPORTANT NOTICE: NOT CONNECTED TO LIVE BANK.
+    This adapter defines the integration specification and HMAC verification for
+    bank-approved merchant webhooks. Live bank connectivity is NOT active until
+    acquiring bank onboarding, business KYC, MCC assignment, and production credentials
+    have been completed with your banking partner.
     """
     adapter_name: str = "standard_bank_production"
     is_simulated: bool = False
+    connection_status: str = "NOT CONNECTED (Integration Framework Ready; Awaiting Bank Onboarding)"
 
     def verify_webhook_signature(
         self,
@@ -832,6 +873,7 @@ class StandardBankMerchantAdapter(MerchantPaymentAdapter):
             "status": str(payload.get("status", "")).strip().lower(),
             "timestamp": int(payload.get("timestamp", 0)),
             "is_simulated": False,
+            "connection_status": self.connection_status,
         }
 
 

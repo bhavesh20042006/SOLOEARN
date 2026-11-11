@@ -38,7 +38,7 @@ def render_invoice_html(invoice: dict[str, Any], output_dir: Path | None = None)
     upi_card_html = ""
     try:
         from core.upi_engine import generate_invoice_upi_qr
-        upi_info = generate_invoice_upi_qr(invoice, save_to_disk=True, initiation_mode="04")
+        upi_info = generate_invoice_upi_qr(invoice, save_to_disk=True, initiation_mode="01")
         upi_card_html = f"""
     <div style="margin-top: 24px; padding: 20px; background: #f0fdf4; border: 1px solid #bbf7d0; border-radius: 10px; display: flex; gap: 24px; align-items: center;">
       <div>
@@ -47,13 +47,13 @@ def render_invoice_html(invoice: dict[str, Any], output_dir: Path | None = None)
       <div style="flex: 1;">
         <div style="display: flex; align-items: center; gap: 8px; margin-bottom: 6px;">
           <span style="background: #166534; color: #ffffff; font-size: 11px; font-weight: 800; padding: 2px 8px; border-radius: 4px; text-transform: uppercase;">Direct UPI Payment</span>
-          <span style="font-size: 12px; color: #166534; font-weight: 600;">Standard Intent (Mode 04) · Direct Bank Transfer</span>
+          <span style="font-size: 12px; color: #166534; font-weight: 600;">Standard QR (Mode 01) & Intent (Mode 04) · Direct Bank Transfer</span>
         </div>
         <p style="margin: 0 0 4px 0; font-size: 14px; font-weight: 700; color: #0f172a;">Scan with Google Pay, PhonePe, Paytm, or BHIM</p>
         <p style="margin: 0 0 4px 0; font-size: 13px; color: #334155;"><strong>Payee:</strong> {html.escape(upi_info['payee_name'])} · <code style="background: #e2e8f0; padding: 2px 6px; border-radius: 4px;">{html.escape(upi_info['payee_vpa'])}</code></p>
         <p style="margin: 0 0 6px 0; font-size: 13px; color: #334155;"><strong>Exact Amount:</strong> ₹{total:,.2f} · <strong>Reference:</strong> {inv_num}</p>
         <div style="margin-bottom: 8px;">
-          <a href="{upi_info['upi_uri']}" style="display: inline-block; padding: 8px 14px; background: #166534; color: #ffffff; text-decoration: none; border-radius: 6px; font-weight: 600; font-size: 13px;">📱 Open in UPI App</a>
+          <a href="{upi_info.get('intent_uri', upi_info['upi_uri'])}" style="display: inline-block; padding: 8px 14px; background: #166534; color: #ffffff; text-decoration: none; border-radius: 6px; font-weight: 600; font-size: 13px;">📱 Open in UPI App</a>
         </div>
         <p style="margin: 0; font-size: 11px; color: #64748b;">Notice: Payment remains pending until verified credit appears on the receiving bank account. Screenshots and text UTRs are not accepted as proof of settlement.</p>
       </div>
@@ -238,7 +238,7 @@ def render_invoice_html(invoice: dict[str, Any], output_dir: Path | None = None)
         <span>Subtotal</span>
         <span>₹{subtotal:,.2f}</span>
       </div>
-      {f'<div class="total-line"><span>GST / Tax ({tax_rate}%)</span><span>₹{tax_amount:,.2f}</span></div>' if tax_amount > 0 else '<div class="total-line" style="font-size: 12px; color: #64748b;"><span>Tax Status</span><span>Unregistered Supplier (0% GST - Section 32, CGST Act)</span></div>'}
+      {f'<div class="total-line"><span>GST / Tax ({tax_rate}%)</span><span>₹{tax_amount:,.2f}</span></div>' if tax_amount > 0 else '<div class="total-line" style="font-size: 12px; color: #64748b;"><span>Tax Status</span><span>GST not charged — Supplier is not registered under GST.</span></div>'}
       <div class="total-line grand">
         <span>Total Due</span>
         <span>₹{total:,.2f}</span>

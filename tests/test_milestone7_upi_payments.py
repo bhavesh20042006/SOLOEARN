@@ -117,8 +117,8 @@ class Milestone7UPIPaymentsTests(unittest.TestCase):
             validate_vpa("user@")
 
     def test_npci_upi_url_builder_and_initiation_mode_selection(self):
-        # Default initiation mode must be '04' (UPI Intent)
-        url = build_upi_payment_url(
+        # 1. Mode 04: Intent (Mobile Web / App-to-App flow)
+        url_intent = build_upi_payment_url(
             payee_vpa="founder@okaxis",
             payee_name="SOLOEARN Operations",
             amount_inr=5000.0,
@@ -127,16 +127,26 @@ class Milestone7UPIPaymentsTests(unittest.TestCase):
             merchant_code="8931",
             initiation_mode="04",
         )
-        self.assertTrue(url.startswith("upi://pay?"))
-        self.assertIn("pa=founder%40okaxis", url)
-        self.assertIn("pn=SOLOEARN+Operations", url)
-        self.assertIn("am=5000.00", url)
-        self.assertIn("cu=INR", url)
-        self.assertIn("tr=INV-2026-0001", url)
-        self.assertIn("mc=8931", url)
-        self.assertIn("mode=04", url)
+        self.assertTrue(url_intent.startswith("upi://pay?"))
+        self.assertIn("pa=founder%40okaxis", url_intent)
+        self.assertIn("pn=SOLOEARN+Operations", url_intent)
+        self.assertIn("am=5000.00", url_intent)
+        self.assertIn("cu=INR", url_intent)
+        self.assertIn("tr=INV-2026-0001", url_intent)
+        self.assertIn("mc=8931", url_intent)
+        self.assertIn("mode=04", url_intent)
 
-        # Standard QR initiation mode '00'
+        # 2. Mode 01: QR Code (Standard Scannable Dynamic QR)
+        url_qr = build_upi_payment_url(
+            payee_vpa="founder@okaxis",
+            payee_name="SOLOEARN Operations",
+            amount_inr=5000.0,
+            transaction_ref="INV-2026-0001",
+            initiation_mode="01",
+        )
+        self.assertIn("mode=01", url_qr)
+
+        # 3. Mode 00: Default Transaction
         url_mode00 = build_upi_payment_url(
             payee_vpa="founder@okaxis",
             payee_name="SOLOEARN Operations",
@@ -146,8 +156,8 @@ class Milestone7UPIPaymentsTests(unittest.TestCase):
         )
         self.assertIn("mode=00", url_mode00)
 
-        # CRITICAL TECHNICAL RULE: Unsigned mode=02 must be rejected!
-        with self.assertRaises(ValueError) as ctx:
+        # 4. CRITICAL TECHNICAL RULE: Unsigned Mode 02 (Secure QR) must be rejected!
+        with self.assertRaises(ValueError) as ctx_02:
             build_upi_payment_url(
                 payee_vpa="founder@okaxis",
                 payee_name="SOLOEARN Operations",
@@ -155,10 +165,21 @@ class Milestone7UPIPaymentsTests(unittest.TestCase):
                 transaction_ref="INV-2026-0001",
                 initiation_mode="02",
             )
-        self.assertIn("Cannot generate unsigned mode=02 (Secure QR)", str(ctx.exception))
+        self.assertIn("Secure QR code (mode 02)", str(ctx_02.exception))
 
-        # Parse back
-        parsed = parse_upi_payment_url(url)
+        # 5. CRITICAL TECHNICAL RULE: Unsigned Mode 05 (Secure Intent) must be rejected!
+        with self.assertRaises(ValueError) as ctx_05:
+            build_upi_payment_url(
+                payee_vpa="founder@okaxis",
+                payee_name="SOLOEARN Operations",
+                amount_inr=5000.0,
+                transaction_ref="INV-2026-0001",
+                initiation_mode="05",
+            )
+        self.assertIn("Secure Intent (mode 05)", str(ctx_05.exception))
+
+        # Parse back roundtrip verification
+        parsed = parse_upi_payment_url(url_intent)
         self.assertEqual(parsed["pa"], "founder@okaxis")
         self.assertEqual(parsed["pn"], "SOLOEARN Operations")
         self.assertEqual(parsed["am"], 5000.0)
@@ -175,8 +196,12 @@ class Milestone7UPIPaymentsTests(unittest.TestCase):
         self.assertIn("consumer_app_behavior", disclosure)
         self.assertIn("anti_fraud_settlement_policy", disclosure)
         self.assertIn("gst_statutory_warning", disclosure)
-        self.assertIn("₹1,00,000", disclosure["personal_upi_limits"])
-        self.assertIn("Section 32", disclosure["gst_statutory_warning"])
+        self.assertIn("Mode 00: Default transaction", disclosure["initiation_mode"])
+        self.assertIn("Mode 01: QR code", disclosure["initiation_mode"])
+        self.assertIn("Mode 02: Secure QR code", disclosure["initiation_mode"])
+        self.assertIn("Mode 04: Intent", disclosure["initiation_mode"])
+        self.assertIn("Mode 05: Secure Intent", disclosure["initiation_mode"])
+        self.assertIn("GST not charged — Supplier is not registered under GST.", disclosure["gst_statutory_warning"])
 
     def test_upi_url_builder_rejects_invalid_inputs(self):
         with self.assertRaises(ValueError):
@@ -195,7 +220,7 @@ class Milestone7UPIPaymentsTests(unittest.TestCase):
             build_upi_payment_url("user@okaxis", "Owner", 5000.0, "REF1", initiation_mode="99")  # invalid mode
 
     def test_dynamic_qr_code_generation(self):
-        test_uri = "upi://pay?pa=soloearn@upi&pn=Soloearn&am=5000.00&cu=INR&tr=INV-2026-0001&mode=04"
+        test_uri = "upi://pay?pa=soloearn@upi&pn=Soloearn&am=5000.00&cu=INR&tr=INV-2026-0001&mode=01"
         png_bytes = generate_upi_qr_bytes(test_uri)
         self.assertIsInstance(png_bytes, bytes)
         self.assertTrue(png_bytes.startswith(b"\x89PNG\r\n\x1a\n"))  # Standard PNG header
@@ -206,11 +231,12 @@ class Milestone7UPIPaymentsTests(unittest.TestCase):
 
     def test_invoice_qr_generation_and_html_embed(self):
         inv = self._create_sample_invoice(amount=5000.0)
-        qr_data = generate_invoice_upi_qr(inv, save_to_disk=True, initiation_mode="04")
+        qr_data = generate_invoice_upi_qr(inv, save_to_disk=True, initiation_mode="01")
         self.assertEqual(qr_data["invoice_number"], inv["invoice_number"])
         self.assertEqual(qr_data["amount_inr"], 5000.0)
         self.assertTrue(qr_data["upi_uri"].startswith("upi://pay?"))
-        self.assertIn("mode=04", qr_data["upi_uri"])
+        self.assertIn("mode=01", qr_data["upi_uri"])
+        self.assertIn("mode=04", qr_data["intent_uri"])
         self.assertIsNotNone(qr_data["qr_file_path"])
         self.assertTrue(Path(qr_data["qr_file_path"]).exists())
 
@@ -219,10 +245,10 @@ class Milestone7UPIPaymentsTests(unittest.TestCase):
         self.assertTrue(html_file.exists())
         html_text = html_file.read_text(encoding="utf-8")
         self.assertIn("Direct UPI Payment", html_text)
-        self.assertIn("Standard Intent (Mode 04)", html_text)
+        self.assertIn("Standard QR (Mode 01)", html_text)
         self.assertIn("data:image/png;base64,", html_text)
         self.assertIn("upi://pay?", html_text)
-        self.assertIn("Unregistered Supplier (0% GST - Section 32, CGST Act)", html_text)
+        self.assertIn("GST not charged — Supplier is not registered under GST.", html_text)
 
     def test_gst_collection_gating_unregistered_vs_registered(self):
         # 1. When tax profile indicates unregistered (is_gst_registered=0), charging tax must fail!
@@ -598,14 +624,16 @@ class Milestone7UPIPaymentsTests(unittest.TestCase):
         inv = self._create_sample_invoice(amount=5000.0)
         inv_num = inv["invoice_number"]
 
-        # 1. Test Adapter Classes
+        # 1. Test Adapter Classes & NOT CONNECTED Status
         sim_adapter = SimulatedBankMerchantAdapter()
         self.assertTrue(sim_adapter.is_simulated)
         self.assertEqual(sim_adapter.adapter_name, "simulated_bank_sandbox")
+        self.assertTrue(sim_adapter.connection_status.startswith("NOT CONNECTED"))
 
         prod_adapter = StandardBankMerchantAdapter()
         self.assertFalse(prod_adapter.is_simulated)
         self.assertEqual(prod_adapter.adapter_name, "standard_bank_production")
+        self.assertTrue(prod_adapter.connection_status.startswith("NOT CONNECTED"))
 
         # 2. Test Replay Attack Protection (Timestamp Skew)
         old_timestamp = int(time.time()) - 600  # 10 minutes ago
@@ -662,6 +690,26 @@ class Milestone7UPIPaymentsTests(unittest.TestCase):
         # 6. Test Idempotency (duplicate webhook notification ignored without double-crediting)
         res_dup = process_merchant_bank_webhook(settle_payload, signature=settle_sig, adapter=sim_adapter)
         self.assertEqual(res_dup["status"], "already_processed")
+
+    def test_ambiguous_statement_matching_and_audit(self):
+        # Create two different invoices with the exact same amount
+        inv1 = self._create_sample_invoice(amount=6000.0)
+        inv2 = self._create_sample_invoice(amount=6000.0)
+
+        # Bank statement row without invoice number in narration
+        ambig_csv = """Date,Description,Amount,Type,Ref
+2026-11-10,UPI/402599887766/CR/GENERIC_CLIENT/HDFC,6000.00,Credit,402599887766
+"""
+        import_bank_statement_csv(ambig_csv, "ambig.csv")
+        with connect() as conn:
+            ambig_row = conn.execute("SELECT * FROM bank_statement_rows WHERE bank_ref='402599887766'").fetchone()
+
+        matches = scan_and_match_statement_for_upi([dict(ambig_row)], [inv1, inv2])
+        self.assertEqual(len(matches), 1)
+        m = matches[0]
+        self.assertEqual(m["match_type"], "ambiguous_multiple_candidates_same_amount")
+        self.assertTrue(m.get("is_ambiguous", False))
+        self.assertEqual(m["confidence"], 0.40)
 
 
 if __name__ == "__main__":

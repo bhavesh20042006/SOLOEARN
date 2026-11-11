@@ -1473,16 +1473,19 @@ with tabs[6]:
     # Stage Info Banner
     if active_upi.get("account_type") == "personal":
         st.info(
-            "**Active Mode: Stage A — Direct Personal UPI (Zero Software Cost)**\n\n"
+            "**Active Mode: Stage A — Direct Personal UPI (Zero Gateway Fees)**\n\n"
             f"• Linked VPA: `{active_upi['payee_vpa']}` · Payee Name: **{active_upi['payee_name']}** · Bank: **{active_upi.get('bank_name', 'Linked Bank Account')}**\n"
-            "• Payments flow directly into your linked bank account via NPCI UPI QR/Intent without intermediary gateway fees.\n"
-            "• Payment confirmation is verified against bank statement credits or bank app transactions."
+            "• Standard Initiation Modes: Scannable QR uses **Mode 01 (QR code)**; Mobile links use **Mode 04 (Intent)**.\n"
+            "• Payments flow directly into your linked bank account without intermediary gateway fees.\n"
+            "• Settlement is verified strictly against receiving bank statement credits confirmed by the owner."
         )
     else:
-        st.success(
-            f"**Active Mode: Stage B — Merchant UPI Integration ({active_upi.get('account_type', '').title()})**\n\n"
-            f"• Merchant VPA: `{active_upi['payee_vpa']}` · Merchant Code: `{active_upi.get('merchant_code', 'N/A')}`\n"
-            "• Connected to bank merchant transaction webhook and automated settlement feed."
+        st.warning(
+            f"**Stage B: Merchant UPI Integration ({active_upi.get('account_type', '').title()}) — NOT CONNECTED**\n\n"
+            f"• Target VPA: `{active_upi['payee_vpa']}` · Configured MCC: `{active_upi.get('merchant_code', 'N/A')}`\n"
+            "• **Connection Status: NOT CONNECTED TO LIVE BANK.**\n"
+            "• The merchant webhook adapter and HMAC verification architecture are implemented in code, "
+            "but live bank connectivity is NOT active. Bank merchant onboarding, sole-proprietor KYC, and bank-assigned credentials are required before live transactions can flow."
         )
 
     # 4 Proposed Headline Metrics
@@ -1545,11 +1548,12 @@ with tabs[6]:
                 f"- **Payee Name:** {upi_qr_data['payee_name']}\n"
                 f"- **Transaction Ref (`tr`):** `{upi_qr_data['transaction_ref']}`\n"
                 f"- **Transaction Note (`tn`):** `{upi_qr_data['transaction_note']}`\n"
+                f"- **Initiation Mode:** `Mode 01 (QR code)` for Scannable QR · `Mode 04 (Intent)` for Mobile Link\n"
                 f"- **Payment Status:** `{chosen_inv['status'].upper()}`\n"
             )
             st.code(upi_qr_data["upi_uri"], language="text")
             st.markdown(
-                f"[📱 Open / Pay with UPI App (GPay / PhonePe / Paytm / BHIM)]({upi_qr_data['upi_uri']})"
+                f"[📱 Open / Pay with UPI App (GPay / PhonePe / Paytm / BHIM)]({upi_qr_data.get('intent_uri', upi_qr_data['upi_uri'])})"
             )
 
             # View rendered HTML invoice button
@@ -1654,9 +1658,9 @@ with tabs[6]:
             options=["personal", "merchant_bank_api", "gateway"],
             index=["personal", "merchant_bank_api", "gateway"].index(active_upi.get("account_type", "personal")),
             format_func=lambda x: {
-                "personal": "Stage A: Personal UPI (Zero Software Cost - Manual / Statement Reconciled)",
-                "merchant_bank_api": "Stage B: Merchant UPI through Bank (Bank Transaction API / Webhook)",
-                "gateway": "Stage C: Third-Party Payment Gateway (Razorpay / Cashfree)",
+                "personal": "Stage A: Personal UPI (Active - Zero Software Cost; Statement Reconciled)",
+                "merchant_bank_api": "Stage B: Merchant UPI through Bank (NOT CONNECTED - Integration Framework Ready)",
+                "gateway": "Stage C: Third-Party Payment Gateway (NOT CONNECTED)",
             }[x],
         )
         cfg_bank = st.text_input("Linked Bank Name", value=active_upi.get("bank_name", "Bank Linked UPI"))
@@ -1680,10 +1684,11 @@ with tabs[6]:
                 st.error(f"Error saving UPI settings: {e}")
 
     # Section 5: Stage B Bank Merchant Webhook Simulator
-    with st.expander("🔌 Stage B — Bank Merchant Onboarding & Webhook Simulator"):
-        st.markdown(
-            "Once your acquiring bank approves merchant UPI onboarding, you receive a business VPA and automated transaction notifications. "
-            "Use this simulator to test incoming bank transaction callbacks with HMAC signature verification."
+    with st.expander("🔌 Stage B — Bank Merchant Onboarding & Webhook Simulator (NOT CONNECTED — Sandbox Only)"):
+        st.warning(
+            "**Status: NOT CONNECTED to Live Bank.**\n\n"
+            "This sandbox simulator tests the internal HMAC-SHA256 signature verification, 300-second replay attack protection, "
+            "and idempotency logic. Live bank connectivity is only established once an acquiring bank approves merchant onboarding."
         )
         sim_col1, sim_col2 = st.columns(2)
         with sim_col1:
