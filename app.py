@@ -14,11 +14,16 @@ from core.commercial_funnel import (
     REAL_SMB_PILOT_TARGETS,
     add_commercial_lead,
     calculate_project_unit_economics,
+    get_100_point_scorecard,
+    get_5_approval_gates_status,
     get_commercial_performance_dashboard,
     get_commercial_pilot_milestones,
+    get_commercial_validation_dashboard,
     get_funnel_metrics,
     init_commercial_tables,
     list_commercial_leads,
+    list_outreach_interactions,
+    record_outreach_interaction,
     seed_real_smb_pilot_leads,
     update_lead_stage,
 )
@@ -209,16 +214,95 @@ with tabs[0]:
 
 # ----------------- Tab 1: Commercial Hub & Client Acquisition (M6.3) -----------------
 with tabs[1]:
-    st.subheader("🎯 Commercial Hub & First Customer Acquisition Pilot (Milestone 6.3)")
-    st.caption("Operational playbook for acquiring the first paying pilot customer through a controlled 5-prospect experiment. All prices quoted strictly ex-GST.")
+    st.subheader("🎯 Commercial Hub & 100/100 Commercial Excellence Initiative")
+    st.caption("Operational cockpit for acquiring paying clients, enforcing human approval gates, and verifying genuine market profitability. All client prices quoted strictly ex-GST.")
 
-    st.info(
-        "**SOLOEARN v0.6.3 Commercial Pilot Readiness: 7.5 / 10**\n\n"
-        "• **Technical Automation (10/10)**: 171 automated unit & integration tests passing on Windows; zero skips/errors in revenue loops.\n"
-        "• **Statutory Tax & Accounting (10/10)**: Section 202 slabs, Section 156 rebate, Section 393 Table 6 payee-specific TDS, and Section 276 cash-method accounting verified.\n"
-        "• **Market Proof & Paying Clients (0/10)**: Feature freeze active. Zero live paying clients acquired yet.\n"
-        "• **Path to 10/10 Readiness**: Execute outreach to the 5 prospective accounts below, secure first paid pilot, deliver work, and reconcile receipt against bank statement."
-    )
+    # Sandbox Isolation & Data Mode Toggle
+    cm_col1, cm_col2 = st.columns([1, 1])
+    with cm_col1:
+        db_mode = st.radio(
+            "Database Reporting Mode",
+            options=["🟢 Live Business Records (100% Unvarnished)", "🧪 Include Sandbox Test Data"],
+            horizontal=True,
+            key="commercial_db_mode_toggle",
+        )
+        include_sandbox = "Sandbox" in db_mode
+    with cm_col2:
+        if not include_sandbox:
+            st.success("🔒 **Sandbox Isolation Active:** Live reports show 0 fabricated customers, 0 fake sales, and ₹0.00 unearned profit.")
+        else:
+            st.warning("🧪 **Sandbox Data Active:** Showing simulated developer test fixtures alongside live entries.")
+
+    val_dash = get_commercial_validation_dashboard(include_sandbox=include_sandbox)
+    scorecard = val_dash["scorecard"]
+    metrics = val_dash["metrics"]
+
+    # 100/100 Commercial Excellence Scoreboard Banner
+    sc_col1, sc_col2 = st.columns([1, 2])
+    with sc_col1:
+        st.metric(
+            "Commercial Excellence Score",
+            f"{scorecard['total_score']} / {scorecard['max_score']}",
+            f"{scorecard['completion_pct']}% ready",
+        )
+        st.progress(scorecard['total_score'] / scorecard['max_score'])
+    with sc_col2:
+        st.info(f"**Audit Verdict:** {scorecard['verdict']}")
+
+    # Expandable 100-Point Target Scorecard (6 Core Objectives)
+    with st.expander("📊 View Detailed 100-Point Scorecard Breakdown (6 Core Objectives)"):
+        st.markdown(
+            "| Pillar | Target Weight | Live Score | Status & Verification Criteria |\n"
+            "| :--- | :---: | :---: | :--- |\n"
+            f"| **1. Product Reliability & Security** | 15.0 pts | **{scorecard['pillars'][0]['score']} pts** | 190+ Windows tests passing, deterministic paisa math, crash resilience, preflight runner |\n"
+            f"| **2. Customer Acquisition & Sales Conversion** | 25.0 pts | **{scorecard['pillars'][1]['score']} pts** | 5 SMB accounts researched; pending live discovery calls (+5 pts) & first paid client (+5 pts) |\n"
+            f"| **3. Delivery Quality & Customer Satisfaction** | 20.0 pts | **{scorecard['pillars'][2]['score']} pts** | 4 service offerings & automated QA ready; pending live client signoff (+4 pts) & revision rate (+4 pts) |\n"
+            f"| **4. Accurate Financial Accounting & Profitability** | 20.0 pts | **{scorecard['pillars'][3]['score']} pts** | Multi-account ledger & Tax 2025 verified; pending ₹25k+ bank receipts (+3 pts) & ₹50k+ profit (+3 pts) |\n"
+            f"| **5. Safe Automation with Human Approval** | 10.0 pts | **{scorecard['pillars'][4]['score']} pts** | 5 Human Approval Gates strictly enforced in database & code |\n"
+            f"| **6. Indian Business, Banking, Tax & Data Compliance** | 10.0 pts | **{scorecard['pillars'][5]['score']} pts** | Udyam MSME, Kotak Safalta ₹5k AQB guide, Mode 01 UPI QR, DPDP principles |\n"
+            f"| **TOTAL COMMERCIAL SCORE** | **100.0 pts** | **{scorecard['total_score']} pts** | **Verified Baseline ({scorecard['completion_pct']}% Ready)** |"
+        )
+        st.caption("Note: Reaching 100/100 does not require more software code. It requires executing the pilot outreach, booking 3 discovery calls, securing the first ₹5,000 paying customer, and verifying bank receipt.")
+
+    # Expandable 5 Human Approval Gates
+    with st.expander("🛡️ View 5 Human Approval Gates (Autonomous Runaway Safeguards)"):
+        st.caption("SOLOEARN strictly forbids unapproved proposals, work commencement, autonomous fund transfers, or automated deliverable dispatches.")
+        gates = get_5_approval_gates_status()
+        for g in gates:
+            st.markdown(
+                f"- **{g['name']}** (`{g['status']}`)\n"
+                f"  - **Rule:** {g['rule']}\n"
+                f"  - **Enforcement:** `{g['enforcement_point']}` · Approved: `{g['approved_count']}` | Pending: `{g['pending_count']}`"
+            )
+
+    # 14 Commercial Validation Metrics Dashboard
+    st.markdown("### 📊 Commercial Validation Dashboard (14 Unvarnished Metrics)")
+    st.caption("Distinguishes genuine acquisition activity, confirmed work, cash collected, and net take-home earnings. Never counts an interested customer or unpaid invoice as profit.")
+
+    v1, v2, v3, v4 = st.columns(4)
+    v1.metric("1. Qualified Prospects", metrics["qualified_prospects"], "Confirmed pain & budget")
+    v2.metric("2. Outreach Attempts", metrics["outreach_attempts"], "Approaches delivered")
+    v3.metric("3. Replies / Conversations", metrics["replies_and_conversations"], "Discovery dialogues")
+    v4.metric("4. Proposals Issued", metrics["proposals_issued"], "Owner-approved quotes")
+
+    v5, v6, v7, v8 = st.columns(4)
+    v5.metric("5. Paying Customers", metrics["paying_customers"], "Paid in ledger")
+    v6.metric("6. Accepted Projects", metrics["accepted_projects"], "Confirmed client scope")
+    v7.metric("7. Repeat Customers", metrics["repeat_customers"], ">=2 paid engagements")
+    v8.metric("8. Cash Received", f"₹{metrics['cash_actually_received_inr']:,.2f}", "Cleared bank cash ex-GST")
+
+    v9, v10, v11, v12 = st.columns(4)
+    v9.metric("9. Outstanding Invoices", f"₹{metrics['outstanding_invoices_inr']:,.2f}", "Awaiting payment")
+    v10.metric("10. Project Contribution", f"₹{metrics['contribution_per_project_inr']:,.2f}", "Avg margin per project")
+    v11.metric("11. Customer Acq. Cost", f"₹{metrics['customer_acquisition_cost_inr']:,.2f}", "Marketing spend / client")
+    v12.metric("12. Operating Expenses", f"₹{metrics['operating_expenses_inr']:,.2f}", "Incurred operational cost")
+
+    v13, v14, v15, v16 = st.columns(4)
+    v13.metric("13. Tax Provisions", f"₹{metrics['tax_provisions_inr']:,.2f}", "Monthly tax reserve")
+    v14.metric("14. Actual Post-Tax Profit", f"₹{metrics['actual_post_tax_owner_profit_inr']:,.2f}", "Real owner take-home")
+    cp_dash = get_commercial_performance_dashboard(include_sandbox=include_sandbox)
+    v15.metric("Owner Hours Invested", f"{cp_dash['owner_hours']} hrs", "Across 5 categories")
+    v16.metric("Pipeline Reconciled Paid", f"₹{val_dash['approval_gates'][2]['approved_count']} rows", "Bank-verified entries")
 
     with st.expander("🚀 M6.3 First Commercial Experiment: 5 Genuine Businesses (Click to View Outreach Scripts)"):
         st.markdown(
@@ -331,23 +415,6 @@ with tabs[1]:
         }
         st.text_area("Personalized Message Template (Customize before sending)", value=scripts_map[sample_script], height=180)
 
-    # Section 1: Commercial Performance Dashboard (7 Core Metrics)
-    st.markdown("### 📊 Commercial Performance Dashboard")
-    st.caption("Distinguishes genuine acquisition activity, confirmed work, cash collected, and net take-home earnings. Never counts an interested customer or unpaid invoice as profit.")
-
-    cp_dash = get_commercial_performance_dashboard()
-    d1, d2, d3, d4 = st.columns(4)
-    d1.metric("1. Prospective Accounts", cp_dash["prospective_accounts"], "Researched public leads")
-    d2.metric("2. Qualified Leads", cp_dash["qualified_leads"], "Confirmed pain point & budget")
-    d3.metric("3. Proposals Sent", cp_dash["proposals_sent"], "Actual acquisition activity")
-    d4.metric("4. Contracts Won", cp_dash["contracts_won"], "Confirmed customer work")
-
-    d5, d6, d7, d8 = st.columns(4)
-    d5.metric("5. Payments Collected", f"₹{cp_dash['payments_collected_inr']:,.2f}", "Actual bank cash received (ex-GST)")
-    d6.metric("6. Project Contribution", f"₹{cp_dash['project_contribution_inr']:,.2f}", "Revenue after direct costs")
-    d7.metric("7. Net Profit After Tax", f"₹{cp_dash['net_profit_after_tax_inr']:,.2f}", "Real take-home earnings")
-    d8.metric("8. Owner Hours Invested", f"{cp_dash['owner_hours']} hrs", "Across 5 labor categories")
-
     with st.expander("🎯 Milestone 6.4: Commercial Validation Targets"):
         st.markdown(
             "The objective of Milestone 6.4 is to prove that SOLOEARN can repeatedly earn money in the real market:\n"
@@ -390,7 +457,7 @@ with tabs[1]:
     st.divider()
 
     # 50/30/5/3 Campaign Progress Metrics
-    f_metrics = get_funnel_metrics()
+    f_metrics = get_funnel_metrics(include_sandbox=include_sandbox)
     c1, c2, c3, c4 = st.columns(4)
     with c1:
         st.metric(
@@ -510,7 +577,7 @@ with tabs[1]:
 
     with lead_col2:
         st.markdown("#### 🔄 Transition Lead Stage")
-        leads_list = list_commercial_leads()
+        leads_list = list_commercial_leads(include_sandbox=include_sandbox)
         if leads_list:
             lead_options = {l["id"]: f"#{l['id']} - {l['company_name']} ({l['contact_name']}) [{l['stage'].title()}]" for l in leads_list}
             selected_lead_id = st.selectbox("Select Prospect", options=list(lead_options.keys()), format_func=lambda x: lead_options[x])
@@ -533,6 +600,79 @@ with tabs[1]:
         st.dataframe(df_leads, use_container_width=True, hide_index=True)
     else:
         st.caption("No leads in pipeline.")
+
+    # Section: Outreach & Sales Interaction Logger
+    st.divider()
+    st.markdown("### 📬 Outreach & Discovery Interaction Logger")
+    st.caption("Log personalized outreach messages sent, discovery calls conducted, proposals delivered, or client feedback/objections received.")
+
+    if leads_list:
+        with st.form("log_outreach_interaction_form"):
+            oi_c1, oi_c2 = st.columns(2)
+            with oi_c1:
+                sel_lead_id = st.selectbox("Select Business Account", options=list(lead_options.keys()), format_func=lambda x: lead_options[x], key="oi_lead_select")
+                target_lead = next(l for l in leads_list if l["id"] == sel_lead_id)
+                int_type = st.selectbox(
+                    "Interaction Type",
+                    options=["outreach_sent", "reply_received", "call_held", "proposal_delivered", "conversion_won", "rejection_received"],
+                    format_func=lambda x: x.replace("_", " ").title(),
+                )
+                chan = st.selectbox("Channel Used", options=["linkedin", "email", "phone_whatsapp", "direct_network", "other"], index=0)
+            with oi_c2:
+                dm_name = st.text_input("Decision-Maker Name", value=target_lead["contact_name"])
+                dm_title = st.text_input("Decision-Maker Title / Role", value=target_lead.get("decision_maker_title", "") or "Founder / Co-Founder")
+                outcome_val = st.selectbox(
+                    "Outcome / Status",
+                    options=["pending", "positive_reply", "call_booked", "proposal_requested", "closed_won", "closed_lost"],
+                    format_func=lambda x: x.replace("_", " ").title(),
+                )
+                loss_val = st.selectbox(
+                    "Loss / Objection Reason (if lost)",
+                    options=["", "price_too_high", "no_immediate_need", "in_house_team", "no_reply", "other"],
+                )
+
+            msg_summary = st.text_area("Message Summary / Conversation Notes", placeholder="e.g. Sent personalized question-led pitch via LinkedIn InMail asking about multi-channel CSV consolidation across retail stores.")
+            update_lead_stage_checkbox = st.checkbox("Automatically advance lead stage based on this interaction", value=True)
+
+            log_submitted = st.form_submit_button("Log Outreach Interaction", use_container_width=True)
+            if log_submitted:
+                if not msg_summary.strip():
+                    st.error("Message summary or notes are required.")
+                else:
+                    new_oi_id = record_outreach_interaction(
+                        lead_id=sel_lead_id,
+                        interaction_type=int_type,
+                        channel=chan,
+                        decision_maker_name=dm_name,
+                        decision_maker_title=dm_title,
+                        message_summary=msg_summary,
+                        outcome=outcome_val,
+                        loss_reason=loss_val,
+                        is_sandbox=include_sandbox,
+                    )
+                    if update_lead_stage_checkbox:
+                        stage_map = {
+                            "outreach_sent": "approached",
+                            "reply_received": "in_conversation",
+                            "call_held": "in_conversation",
+                            "proposal_delivered": "in_conversation",
+                            "conversion_won": "paid_pilot",
+                            "rejection_received": "lost",
+                        }
+                        if int_type in stage_map:
+                            update_lead_stage(sel_lead_id, stage_map[int_type], notes=msg_summary, loss_reason=loss_val)
+                    st.success(f"Interaction #{new_oi_id} successfully logged for {target_lead['company_name']}!")
+                    st.rerun()
+
+        st.markdown("#### 📜 Recent Outreach Interactions History")
+        interactions = list_outreach_interactions(include_sandbox=include_sandbox)
+        if interactions:
+            df_oi = pd.DataFrame(interactions)[["id", "lead_id", "interaction_type", "channel", "decision_maker_name", "outcome", "loss_reason", "created_at"]]
+            st.dataframe(df_oi, use_container_width=True, hide_index=True)
+        else:
+            st.caption("No outreach interactions logged yet. Use the form above to record your first message.")
+    else:
+        st.info("No leads available in this view. Seed the 5 SMB targets above or add a prospect below to start logging outreach.")
 
     st.divider()
 

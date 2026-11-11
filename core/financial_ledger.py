@@ -83,6 +83,7 @@ def record_ledger_transaction(
     tx_date: str = "",
     is_reversal: bool = False,
     linked_tx_id: int | None = None,
+    is_sandbox: bool = False,
 ) -> int:
     """
     Appends an immutable financial transaction into the ledger.
@@ -101,8 +102,8 @@ def record_ledger_transaction(
         cur = conn.execute(
             """INSERT INTO financial_transactions (
                 tx_date, tx_type, amount_inr, amount_paise, currency,
-                reference_id, description, is_reversal, linked_tx_id, created_at
-            ) VALUES (?, ?, ?, ?, 'INR', ?, ?, ?, ?, ?)""",
+                reference_id, description, is_reversal, linked_tx_id, is_sandbox, created_at
+            ) VALUES (?, ?, ?, ?, 'INR', ?, ?, ?, ?, ?, ?)""",
             (
                 eff_date,
                 tx_type,
@@ -112,6 +113,7 @@ def record_ledger_transaction(
                 str(description)[:255],
                 1 if is_reversal else 0,
                 linked_tx_id,
+                1 if is_sandbox else 0,
                 utc_now(),
             ),
         )
@@ -196,26 +198,27 @@ def record_invoice_refund(
             raise ValueError("Refund tax allocation failed validation")
 
         now = utc_now()
+        is_sb = int(inv["is_sandbox"] or 0) if "is_sandbox" in inv.keys() else 0
         if refund_ex > 0:
             conn.execute(
                 """INSERT INTO financial_transactions (
                     tx_date, tx_type, amount_inr, amount_paise, currency,
-                    reference_id, description, is_reversal, created_at
-                ) VALUES (?, 'refund', ?, ?, 'INR', ?, ?, 0, ?)""",
+                    reference_id, description, is_reversal, is_sandbox, created_at
+                ) VALUES (?, 'refund', ?, ?, 'INR', ?, ?, 0, ?, ?)""",
                 (
                     eff_date, refund_ex, inr_to_paise(refund_ex), ref_id,
-                    f"Ex-GST client refund for {invoice_number.strip()}", now,
+                    f"Ex-GST client refund for {invoice_number.strip()}", is_sb, now,
                 ),
             )
         if refund_gst > 0:
             conn.execute(
                 """INSERT INTO financial_transactions (
                     tx_date, tx_type, amount_inr, amount_paise, currency,
-                    reference_id, description, is_reversal, created_at
-                ) VALUES (?, 'gst_refund', ?, ?, 'INR', ?, ?, 0, ?)""",
+                    reference_id, description, is_reversal, is_sandbox, created_at
+                ) VALUES (?, 'gst_refund', ?, ?, 'INR', ?, ?, 0, ?, ?)""",
                 (
                     eff_date, refund_gst, inr_to_paise(refund_gst), ref_id,
-                    f"GST component of client refund for {invoice_number.strip()}", now,
+                    f"GST component of client refund for {invoice_number.strip()}", is_sb, now,
                 ),
             )
 
@@ -230,13 +233,18 @@ def record_invoice_refund(
     }
 
 
-def list_ledger_transactions(limit: int = 100, tx_type: str = "") -> list[dict[str, Any]]:
+def list_ledger_transactions(limit: int = 100, tx_type: str = "", include_sandbox: bool = True) -> list[dict[str, Any]]:
     """Retrieves recent ledger transactions in reverse chronological order."""
     query = "SELECT * FROM financial_transactions"
     params: list[Any] = []
+    conditions: list[str] = []
     if tx_type:
-        query += " WHERE tx_type = ?"
+        conditions.append("tx_type = ?")
         params.append(tx_type)
+    if not include_sandbox:
+        conditions.append("(is_sandbox = 0 OR is_sandbox IS NULL)")
+    if conditions:
+        query += " WHERE " + " AND ".join(conditions)
     query += " ORDER BY id DESC LIMIT ?"
     params.append(max(1, min(limit, 500)))
 
@@ -263,6 +271,7 @@ def register_expense(
     ca_review_confirmed: bool = False,
     ca_review_notes: str = "",
     reviewed_by: str = "",
+    is_sandbox: bool = False,
 ) -> int:
     """
     Registers an incurred business expense in the expenses table.
@@ -298,8 +307,8 @@ def register_expense(
                 expense_date, vendor, category, amount_inr, amount_paise, currency,
                 job_id, is_recurring, business_use_pct, gst_amount_inr,
                 tax_deductibility, reviewer_notes, ca_review_confirmed,
-                ca_review_notes, reviewed_by, reviewed_at, created_at
-            ) VALUES (?, ?, ?, ?, ?, 'INR', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                ca_review_notes, reviewed_by, reviewed_at, is_sandbox, created_at
+            ) VALUES (?, ?, ?, ?, ?, 'INR', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (
                 eff_date,
                 vendor.strip()[:120],
@@ -316,6 +325,7 @@ def register_expense(
                 ca_review_notes.strip()[:500],
                 reviewed_by.strip()[:100],
                 now if ca_review_confirmed else None,
+                1 if is_sandbox else 0,
                 now,
             ),
         )
@@ -373,7 +383,12 @@ def confirm_expense_tax_deductibility(
     }
 
 
-def list_expenses(limit: int = 100, category: str = "", job_id: int | None = None) -> list[dict[str, Any]]:
+def list_expenses(
+    limit: int = 100,
+    category: str = "",
+    job_id: int | None = None,
+    include_sandbox: bool = True,
+) -> list[dict[str, Any]]:
     """Lists recorded expenses with optional category or job filters."""
     query = "SELECT * FROM expenses"
     params: list[Any] = []
@@ -385,6 +400,8 @@ def list_expenses(limit: int = 100, category: str = "", job_id: int | None = Non
     if job_id is not None:
         conditions.append("job_id = ?")
         params.append(job_id)
+    if not include_sandbox:
+        conditions.append("(is_sandbox = 0 OR is_sandbox IS NULL)")
 
     if conditions:
         query += " WHERE " + " AND ".join(conditions)
@@ -397,35 +414,38 @@ def list_expenses(limit: int = 100, category: str = "", job_id: int | None = Non
         return [dict(r) for r in rows]
 
 
-def get_expenses_summary(month: str = "") -> dict[str, Any]:
+def get_expenses_summary(month: str = "", include_sandbox: bool = False) -> dict[str, Any]:
     """Computes total expenses, categorized breakdown, and deductible sums."""
     eff_month = month.strip() if month else ""
+    sandbox_clause = "AND (is_sandbox = 0 OR is_sandbox IS NULL)" if not include_sandbox else ""
     with connect() as conn:
         if eff_month and eff_month != "all":
             rows = conn.execute(
-                """SELECT category, SUM(amount_inr) as total_inr, COUNT(*) as count 
+                f"""SELECT category, SUM(amount_inr) as total_inr, COUNT(*) as count 
                    FROM expenses 
-                   WHERE expense_date LIKE ? 
+                   WHERE expense_date LIKE ? {sandbox_clause}
                    GROUP BY category""",
                 (f"{eff_month}%",),
             ).fetchall()
             deductible_row = conn.execute(
-                """SELECT SUM(amount_inr * (business_use_pct / 100.0)) as total_deductible
+                f"""SELECT SUM(amount_inr * (business_use_pct / 100.0)) as total_deductible
                    FROM expenses 
                    WHERE expense_date LIKE ? 
                      AND tax_deductibility IN ('deductible', 'partly_deductible')
-                     AND ca_review_confirmed = 1""",
+                     AND ca_review_confirmed = 1 {sandbox_clause}""",
                 (f"{eff_month}%",),
             ).fetchone()
         else:
+            where_clause = "WHERE (is_sandbox = 0 OR is_sandbox IS NULL)" if not include_sandbox else ""
             rows = conn.execute(
-                "SELECT category, SUM(amount_inr) as total_inr, COUNT(*) as count FROM expenses GROUP BY category"
+                f"SELECT category, SUM(amount_inr) as total_inr, COUNT(*) as count FROM expenses {where_clause} GROUP BY category"
             ).fetchall()
+            deductible_where = "WHERE tax_deductibility IN ('deductible', 'partly_deductible') AND ca_review_confirmed = 1"
+            if not include_sandbox:
+                deductible_where += " AND (is_sandbox = 0 OR is_sandbox IS NULL)"
             deductible_row = conn.execute(
-                """SELECT SUM(amount_inr * (business_use_pct / 100.0)) as total_deductible
-                   FROM expenses 
-                   WHERE tax_deductibility IN ('deductible', 'partly_deductible')
-                     AND ca_review_confirmed = 1"""
+                f"""SELECT SUM(amount_inr * (business_use_pct / 100.0)) as total_deductible
+                   FROM expenses {deductible_where}"""
             ).fetchone()
 
         by_cat = {r["category"]: round(float(r["total_inr"] or 0.0), 2) for r in rows}
@@ -751,18 +771,19 @@ def reconcile_statement_row(
             if opp_row and opp_row["status"] in {"submitted_by_owner", "won", "invoiced"}:
                 conn.execute("UPDATE opportunities SET status='paid' WHERE id=?", (opp_id,))
 
+            is_sb = int(inv["is_sandbox"] or 0) if "is_sandbox" in inv.keys() else 0
             rev_row = conn.execute(
                 "SELECT id FROM revenue WHERE description LIKE ? OR description LIKE ?",
                 (f"%{inv_num}%", f"%{ref_for_row}%"),
             ).fetchone()
             if not rev_row:
                 conn.execute(
-                    """INSERT INTO revenue(opportunity_id, task_id, description, amount_inr, status, paid_at, created_at)
-                       VALUES (?, ?, ?, ?, 'paid', ?, ?)""",
+                    """INSERT INTO revenue(opportunity_id, task_id, description, amount_inr, status, paid_at, is_sandbox, created_at)
+                       VALUES (?, ?, ?, ?, 'paid', ?, ?, ?)""",
                     (
                         opp_id, task_id,
                         f"Reconciled payment for {inv_num} ({inv['client_name']}) - Ref: {ref_for_row}",
-                        float(inv["amount_total"]), now, now,
+                        float(inv["amount_total"]), now, is_sb, now,
                     ),
                 )
 
@@ -776,33 +797,33 @@ def reconcile_statement_row(
                 conn.execute(
                     """INSERT INTO financial_transactions (
                         tx_date, tx_type, amount_inr, amount_paise, currency,
-                        reference_id, description, is_reversal, created_at
-                    ) VALUES (?, 'client_receipt', ?, ?, 'INR', ?, ?, 0, ?)""",
+                        reference_id, description, is_reversal, is_sandbox, created_at
+                    ) VALUES (?, 'client_receipt', ?, ?, 'INR', ?, ?, 0, ?, ?)""",
                     (
                         str(st_row["tx_date"])[:10], subtotal, inr_to_paise(subtotal),
-                        inv_num, f"Reconciled client receipt for {inv_num} ({inv['client_name']})", now,
+                        inv_num, f"Reconciled client receipt for {inv_num} ({inv['client_name']})", is_sb, now,
                     ),
                 )
                 if tax_amt > 0:
                     conn.execute(
                         """INSERT INTO financial_transactions (
                             tx_date, tx_type, amount_inr, amount_paise, currency,
-                            reference_id, description, is_reversal, created_at
-                        ) VALUES (?, 'gst_collected', ?, ?, 'INR', ?, ?, 0, ?)""",
+                            reference_id, description, is_reversal, is_sandbox, created_at
+                        ) VALUES (?, 'gst_collected', ?, ?, 'INR', ?, ?, 0, ?, ?)""",
                         (
                             str(st_row["tx_date"])[:10], tax_amt, inr_to_paise(tax_amt),
-                            inv_num, f"GST collected on {inv_num}", now,
+                            inv_num, f"GST collected on {inv_num}", is_sb, now,
                         ),
                     )
                 if tds_val > 0:
                     conn.execute(
                         """INSERT INTO financial_transactions (
                             tx_date, tx_type, amount_inr, amount_paise, currency,
-                            reference_id, description, is_reversal, created_at
-                        ) VALUES (?, 'tds_credit', ?, ?, 'INR', ?, ?, 0, ?)""",
+                            reference_id, description, is_reversal, is_sandbox, created_at
+                        ) VALUES (?, 'tds_credit', ?, ?, 'INR', ?, ?, 0, ?, ?)""",
                         (
                             str(st_row["tx_date"])[:10], tds_val, inr_to_paise(tds_val),
-                            inv_num, f"TDS withheld by client on {inv_num} ({inv['client_name']})", now,
+                            inv_num, f"TDS withheld by client on {inv_num} ({inv['client_name']})", is_sb, now,
                         ),
                     )
                     conn.execute(
@@ -811,6 +832,7 @@ def reconcile_statement_row(
                     )
 
         elif entity_type == "expense" and exp is not None:
+            is_sb = int(exp["is_sandbox"] or 0) if "is_sandbox" in exp.keys() else 0
             exp_ref = f"EXP-{int(exp['id']):05d}"
             existing_tx = conn.execute(
                 "SELECT id FROM financial_transactions WHERE reference_id=? AND tx_type IN ('expense','direct_cost')",
@@ -821,11 +843,11 @@ def reconcile_statement_row(
                 conn.execute(
                     """INSERT INTO financial_transactions (
                         tx_date, tx_type, amount_inr, amount_paise, currency,
-                        reference_id, description, is_reversal, created_at
-                    ) VALUES (?, ?, ?, ?, 'INR', ?, ?, 0, ?)""",
+                        reference_id, description, is_reversal, is_sandbox, created_at
+                    ) VALUES (?, ?, ?, ?, 'INR', ?, ?, 0, ?, ?)""",
                     (
                         str(st_row["tx_date"])[:10], tx_t, amount, inr_to_paise(amount),
-                        exp_ref, f"Paid expense {exp['vendor']} ({exp['category']})", now,
+                        exp_ref, f"Paid expense {exp['vendor']} ({exp['category']})", is_sb, now,
                     ),
                 )
 
@@ -887,6 +909,7 @@ def reconcile_statement_row(
 def get_cash_and_reserves_summary(
     month: str = "",
     working_capital_buffer_inr: float = DEFAULT_WORKING_CAPITAL_BUFFER_INR,
+    include_sandbox: bool = False,
 ) -> dict[str, Any]:
     """
     Computes exact available cash runway and owner distributable profit:
@@ -899,6 +922,8 @@ def get_cash_and_reserves_summary(
       W = Working capital buffer reserve (default ₹25,000)
     """
     eff_month = month.strip() if month else utc_now()[:7]
+    sandbox_clause = "AND (is_sandbox = 0 OR is_sandbox IS NULL)" if not include_sandbox else ""
+    sandbox_where = "WHERE (is_sandbox = 0 OR is_sandbox IS NULL)" if not include_sandbox else ""
 
     with connect() as conn:
         # Check bank opening balance
@@ -909,35 +934,35 @@ def get_cash_and_reserves_summary(
         # MTD performance metrics (scoped to eff_month if not 'all')
         if eff_month and eff_month != "all":
             rec_row = conn.execute(
-                """SELECT COALESCE(SUM(
+                f"""SELECT COALESCE(SUM(
                        CASE WHEN tx_type = 'client_receipt' THEN amount_inr
                             WHEN tx_type = 'refund' THEN -amount_inr
                             ELSE 0 END
                    ), 0)
                    FROM financial_transactions
-                   WHERE tx_type IN ('client_receipt', 'refund') AND tx_date LIKE ?""",
+                   WHERE tx_type IN ('client_receipt', 'refund') AND tx_date LIKE ? {sandbox_clause}""",
                 (f"{eff_month}%",),
             ).fetchone()
             # client_receipt and refund are both recorded excluding GST; refunds
             # therefore reduce realized service receipts, operating profit and taxable profit.
             collected_receipts = float(rec_row[0] if rec_row else 0.0)
 
-            exp_summary = get_expenses_summary(month=eff_month)
+            exp_summary = get_expenses_summary(month=eff_month, include_sandbox=include_sandbox)
             total_operating_expenses = exp_summary["total_expenses_inr"]
             deductible_operating_expenses = exp_summary["deductible_expenses_inr"]
         else:
             rec_row = conn.execute(
-                """SELECT COALESCE(SUM(
+                f"""SELECT COALESCE(SUM(
                        CASE WHEN tx_type = 'client_receipt' THEN amount_inr
                             WHEN tx_type = 'refund' THEN -amount_inr
                             ELSE 0 END
                    ), 0)
                    FROM financial_transactions
-                   WHERE tx_type IN ('client_receipt', 'refund')"""
+                   WHERE tx_type IN ('client_receipt', 'refund') {sandbox_clause}"""
             ).fetchone()
             collected_receipts = float(rec_row[0] if rec_row else 0.0)
 
-            exp_summary = get_expenses_summary(month="all")
+            exp_summary = get_expenses_summary(month="all", include_sandbox=include_sandbox)
             total_operating_expenses = exp_summary["total_expenses_inr"]
             deductible_operating_expenses = exp_summary["deductible_expenses_inr"]
 
@@ -950,13 +975,13 @@ def get_cash_and_reserves_summary(
             # Accrual basis: recognize invoiced revenue ex-GST
             if eff_month and eff_month != "all":
                 inv_row = conn.execute(
-                    """SELECT COALESCE(SUM(amount_subtotal), 0) FROM invoices
-                       WHERE status <> 'cancelled' AND substr(issued_at, 1, 7) = ?""",
+                    f"""SELECT COALESCE(SUM(amount_subtotal), 0) FROM invoices
+                       WHERE status <> 'cancelled' AND substr(issued_at, 1, 7) = ? {sandbox_clause}""",
                     (eff_month,),
                 ).fetchone()
             else:
                 inv_row = conn.execute(
-                    "SELECT COALESCE(SUM(amount_subtotal), 0) FROM invoices WHERE status <> 'cancelled'"
+                    f"SELECT COALESCE(SUM(amount_subtotal), 0) FROM invoices WHERE status <> 'cancelled' {sandbox_clause}"
                 ).fetchone()
             mercantile_turnover = float(inv_row[0] if inv_row else 0.0)
             operating_profit = round(mercantile_turnover - total_operating_expenses, 2)
@@ -967,7 +992,7 @@ def get_cash_and_reserves_summary(
             taxable_business_profit = max(0.0, round(collected_receipts - deductible_operating_expenses, 2))
 
         # Lifetime / All ledger transactions for bank cash & reserves
-        txs = conn.execute("SELECT tx_type, SUM(amount_inr) as total_inr FROM financial_transactions GROUP BY tx_type").fetchall()
+        txs = conn.execute(f"SELECT tx_type, SUM(amount_inr) as total_inr FROM financial_transactions {sandbox_where} GROUP BY tx_type").fetchall()
         tx_sums = {r["tx_type"]: float(r["total_inr"] or 0.0) for r in txs}
 
         all_collected_receipts = tx_sums.get("client_receipt", 0.0)
@@ -983,23 +1008,23 @@ def get_cash_and_reserves_summary(
 
         # Reconciled paid expenses (expenses that have been matched in bank_statement_rows)
         paid_exp_row = conn.execute(
-            """SELECT COALESCE(SUM(amount_inr), 0) FROM expenses
+            f"""SELECT COALESCE(SUM(amount_inr), 0) FROM expenses
                WHERE id IN (
                    SELECT CAST(matched_entity_id AS INTEGER)
                    FROM bank_statement_rows
                    WHERE is_reconciled = 1 AND matched_entity_type = 'expense'
-               )"""
+               ) {sandbox_clause}"""
         ).fetchone()
         paid_expenses = float(paid_exp_row[0] if paid_exp_row else 0.0)
 
         # Unpaid bills (expenses entered that are not yet matched to a bank statement row)
         unpaid_row = conn.execute(
-            """SELECT COALESCE(SUM(amount_inr), 0) FROM expenses
+            f"""SELECT COALESCE(SUM(amount_inr), 0) FROM expenses
                WHERE id NOT IN (
                    SELECT CAST(matched_entity_id AS INTEGER)
                    FROM bank_statement_rows
                    WHERE is_reconciled = 1 AND matched_entity_type = 'expense'
-               )"""
+               ) {sandbox_clause}"""
         ).fetchone()
         unpaid_bills = round(float(unpaid_row[0] if unpaid_row else 0.0), 2)
 

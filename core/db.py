@@ -313,6 +313,47 @@ def init_db() -> None:
         if "amount_paid" not in inv_cols:
             conn.execute("ALTER TABLE invoices ADD COLUMN amount_paid REAL NOT NULL DEFAULT 0.0")
 
+        # Ensure is_sandbox column exists across core tables to separate live business records from sandbox simulations
+        opp_cols = [r["name"] for r in conn.execute("PRAGMA table_info(opportunities)").fetchall()]
+        if "is_sandbox" not in opp_cols:
+            conn.execute("ALTER TABLE opportunities ADD COLUMN is_sandbox INTEGER NOT NULL DEFAULT 0")
+        if "is_sandbox" not in inv_cols:
+            conn.execute("ALTER TABLE invoices ADD COLUMN is_sandbox INTEGER NOT NULL DEFAULT 0")
+        if "is_sandbox" not in exp_cols:
+            conn.execute("ALTER TABLE expenses ADD COLUMN is_sandbox INTEGER NOT NULL DEFAULT 0")
+
+        ft_cols = [r["name"] for r in conn.execute("PRAGMA table_info(financial_transactions)").fetchall()]
+        if "is_sandbox" not in ft_cols:
+            conn.execute("ALTER TABLE financial_transactions ADD COLUMN is_sandbox INTEGER NOT NULL DEFAULT 0")
+            # Mark historical preflight and dummy testing fixtures as sandbox data
+            conn.execute(
+                """UPDATE financial_transactions SET is_sandbox = 1
+                   WHERE reference_id LIKE 'INV-TEST-%'
+                      OR reference_id LIKE 'EXP-%'
+                      OR description LIKE '%Acme D2C%'
+                      OR description LIKE '%Client One%'
+                      OR description LIKE '%Client Two%'
+                      OR description LIKE '%Ollama Host%'"""
+            )
+            conn.execute(
+                """UPDATE expenses SET is_sandbox = 1
+                   WHERE vendor LIKE '%Google Cloud%'
+                      OR vendor LIKE '%Ollama%'
+                      OR reviewer_notes LIKE '%Ollama%'"""
+            )
+
+        task_cols = [r["name"] for r in conn.execute("PRAGMA table_info(tasks)").fetchall()]
+        if "is_sandbox" not in task_cols:
+            conn.execute("ALTER TABLE tasks ADD COLUMN is_sandbox INTEGER NOT NULL DEFAULT 0")
+
+        bsr_cols = [r["name"] for r in conn.execute("PRAGMA table_info(bank_statement_rows)").fetchall()]
+        if "is_sandbox" not in bsr_cols:
+            conn.execute("ALTER TABLE bank_statement_rows ADD COLUMN is_sandbox INTEGER NOT NULL DEFAULT 0")
+
+        rev_cols = [r["name"] for r in conn.execute("PRAGMA table_info(revenue)").fetchall()]
+        if "is_sandbox" not in rev_cols:
+            conn.execute("ALTER TABLE revenue ADD COLUMN is_sandbox INTEGER NOT NULL DEFAULT 0")
+
         tax_cols = [r["name"] for r in conn.execute("PRAGMA table_info(tax_profiles)").fetchall()]
         if "other_pan_aggregate_turnover_inr" not in tax_cols:
             conn.execute(
@@ -356,14 +397,14 @@ def log_event(event: str, details: str) -> None:
         )
 
 
-def add_opportunity(data: dict[str, Any], score: float) -> int:
+def add_opportunity(data: dict[str, Any], score: float, is_sandbox: bool = False) -> int:
     with connect() as conn:
         cur = conn.execute(
             """INSERT INTO opportunities(
                 title, source, url, description, amount_inr, estimated_hours,
                 skill_match, payment_confidence, risk_level, source_permitted,
-                status, score, content_hash, created_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'new', ?, ?, ?)""",
+                status, score, content_hash, is_sandbox, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'new', ?, ?, ?, ?)""",
             (
                 data["title"][:180],
                 data["source"][:80],
@@ -377,6 +418,7 @@ def add_opportunity(data: dict[str, Any], score: float) -> int:
                 1 if data.get("source_permitted") else 0,
                 float(score),
                 data.get("content_hash", "")[:128],
+                1 if (is_sandbox or data.get("is_sandbox")) else 0,
                 utc_now(),
             ),
         )
@@ -391,9 +433,14 @@ def get_opportunity(item_id: int) -> dict[str, Any] | None:
     return dict(row) if row else None
 
 
-def list_opportunities() -> list[dict[str, Any]]:
+def list_opportunities(include_sandbox: bool = True) -> list[dict[str, Any]]:
     with connect() as conn:
-        rows = conn.execute("SELECT * FROM opportunities ORDER BY score DESC, id DESC").fetchall()
+        if include_sandbox:
+            rows = conn.execute("SELECT * FROM opportunities ORDER BY score DESC, id DESC").fetchall()
+        else:
+            rows = conn.execute(
+                "SELECT * FROM opportunities WHERE (is_sandbox = 0 OR is_sandbox IS NULL) ORDER BY score DESC, id DESC"
+            ).fetchall()
     return [dict(row) for row in rows]
 
 
@@ -483,12 +530,27 @@ def update_opportunity_status(item_id: int, status: str) -> None:
     log_event("opportunity_status_changed", f"id={item_id}; status={status}")
 
 
-def create_task(title: str, task_type: str, workspace: str, opportunity_id: int | None = None, notes: str = "") -> int:
+def create_task(
+    title: str,
+    task_type: str,
+    workspace: str,
+    opportunity_id: int | None = None,
+    notes: str = "",
+    is_sandbox: bool = False,
+) -> int:
     with connect() as conn:
         cur = conn.execute(
-            """INSERT INTO tasks(opportunity_id, title, task_type, status, workspace, notes, created_at)
-            VALUES (?, ?, ?, 'created', ?, ?, ?)""",
-            (opportunity_id, title[:180], task_type[:60], str(workspace), notes[:2000], utc_now()),
+            """INSERT INTO tasks(opportunity_id, title, task_type, status, workspace, notes, is_sandbox, created_at)
+            VALUES (?, ?, ?, 'created', ?, ?, ?, ?)""",
+            (
+                opportunity_id,
+                title[:180],
+                task_type[:60],
+                str(workspace),
+                notes[:2000],
+                1 if is_sandbox else 0,
+                utc_now(),
+            ),
         )
         task_id = int(cur.lastrowid)
     log_event("task_created", f"id={task_id}; title={title[:120]}")
@@ -842,6 +904,7 @@ def create_invoice(
     due_days: int = 14,
     notes: str = "",
     require_gst_registration: bool = False,
+    is_sandbox: bool = False,
 ) -> dict[str, Any]:
     client = str(client_name or "").strip()
     if not client:
@@ -935,12 +998,12 @@ def create_invoice(
             """INSERT INTO invoices(
                 invoice_number, opportunity_id, task_id, client_name, service_tier,
                 amount_subtotal, tax_rate, tax_amount, amount_total, currency,
-                status, notes, issued_at, due_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'INR', 'issued', ?, ?, ?)""",
+                status, notes, is_sandbox, issued_at, due_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'INR', 'issued', ?, ?, ?, ?)""",
             (
                 inv_num, opportunity_id, task_id_value, client[:120], tier[:60],
                 subtotal, tax_rate_value, tax_amount, amount_total,
-                str(notes or "").strip()[:1000], now, due_str,
+                str(notes or "").strip()[:1000], 1 if is_sandbox else 0, now, due_str,
             ),
         )
         inv_id = int(cur.lastrowid)
@@ -961,14 +1024,23 @@ def get_invoice(invoice_id: int | None = None, invoice_number: str | None = None
     return dict(row) if row else None
 
 
-def list_invoices() -> list[dict[str, Any]]:
+def list_invoices(include_sandbox: bool = True) -> list[dict[str, Any]]:
     with connect() as conn:
-        rows = conn.execute(
-            """SELECT i.*, o.title as opportunity_title
-               FROM invoices i
-               JOIN opportunities o ON o.id=i.opportunity_id
-               ORDER BY i.id DESC"""
-        ).fetchall()
+        if include_sandbox:
+            rows = conn.execute(
+                """SELECT i.*, o.title as opportunity_title
+                   FROM invoices i
+                   JOIN opportunities o ON o.id=i.opportunity_id
+                   ORDER BY i.id DESC"""
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                """SELECT i.*, o.title as opportunity_title
+                   FROM invoices i
+                   JOIN opportunities o ON o.id=i.opportunity_id
+                   WHERE (i.is_sandbox = 0 OR i.is_sandbox IS NULL)
+                   ORDER BY i.id DESC"""
+            ).fetchall()
     return [dict(row) for row in rows]
 
 
@@ -1035,16 +1107,19 @@ def verify_invoice_payment(
         if opp_row and opp_row["status"] in {"submitted_by_owner", "won", "invoiced"}:
             conn.execute("UPDATE opportunities SET status='paid' WHERE id=?", (opp_id,))
 
+        is_sb = int(inv["is_sandbox"] or 0) if "is_sandbox" in inv.keys() else 0
+
         # Automatically record paid revenue in financial ledger
         conn.execute(
-            """INSERT INTO revenue(opportunity_id, task_id, description, amount_inr, status, paid_at, created_at)
-               VALUES (?, ?, ?, ?, 'paid', ?, ?)""",
+            """INSERT INTO revenue(opportunity_id, task_id, description, amount_inr, status, paid_at, is_sandbox, created_at)
+               VALUES (?, ?, ?, ?, 'paid', ?, ?, ?)""",
             (
                 opp_id,
                 task_id,
                 f"Verified payment for {inv['invoice_number']} ({inv['client_name']}) - Ref: {payment_reference.strip()}",
                 amt,
                 now,
+                is_sb,
                 now,
             ),
         )
@@ -1060,14 +1135,15 @@ def verify_invoice_payment(
             conn.execute(
                 """INSERT INTO financial_transactions (
                     tx_date, tx_type, amount_inr, amount_paise, currency,
-                    reference_id, description, is_reversal, created_at
-                ) VALUES (?, 'client_receipt', ?, ?, 'INR', ?, ?, 0, ?)""",
+                    reference_id, description, is_reversal, is_sandbox, created_at
+                ) VALUES (?, 'client_receipt', ?, ?, 'INR', ?, ?, 0, ?, ?)""",
                 (
                     now[:10],
                     subtotal,
                     int(round(subtotal * 100)),
                     inv["invoice_number"],
                     f"Owner-confirmed client receipt for {inv['invoice_number']} ({inv['client_name']})",
+                    is_sb,
                     now,
                 ),
             )
@@ -1075,14 +1151,15 @@ def verify_invoice_payment(
                 conn.execute(
                     """INSERT INTO financial_transactions (
                         tx_date, tx_type, amount_inr, amount_paise, currency,
-                        reference_id, description, is_reversal, created_at
-                    ) VALUES (?, 'gst_collected', ?, ?, 'INR', ?, ?, 0, ?)""",
+                        reference_id, description, is_reversal, is_sandbox, created_at
+                    ) VALUES (?, 'gst_collected', ?, ?, 'INR', ?, ?, 0, ?, ?)""",
                     (
                         now[:10],
                         tax_amt,
                         int(round(tax_amt * 100)),
                         inv["invoice_number"],
                         f"GST collected on {inv['invoice_number']}",
+                        is_sb,
                         now,
                     ),
                 )
@@ -1304,7 +1381,7 @@ def get_owner_time_summary() -> dict[str, Any]:
         }
 
 
-def get_financial_states_summary() -> dict[str, float]:
+def get_financial_states_summary(include_sandbox: bool = False) -> dict[str, float]:
     """
     Distinguishes the 6 financial states across the lifecycle:
     1. estimated_pipeline: opportunities in 'new', 'screened', 'proposal_approved'
@@ -1316,33 +1393,37 @@ def get_financial_states_summary() -> dict[str, float]:
     7. refunded: client refunds and credit notes
     """
     with connect() as conn:
+        sandbox_opp = "AND (is_sandbox = 0 OR is_sandbox IS NULL)" if not include_sandbox else ""
+        sandbox_inv = "AND (is_sandbox = 0 OR is_sandbox IS NULL)" if not include_sandbox else ""
+        sandbox_tx = "WHERE (is_sandbox = 0 OR is_sandbox IS NULL)" if not include_sandbox else ""
+
         # 1. Estimated Pipeline
         row = conn.execute(
-            "SELECT COALESCE(SUM(amount_inr), 0) FROM opportunities WHERE status IN ('new', 'screened', 'proposal_approved')"
+            f"SELECT COALESCE(SUM(amount_inr), 0) FROM opportunities WHERE status IN ('new', 'screened', 'proposal_approved') {sandbox_opp}"
         ).fetchone()
         estimated = float(row[0] if row else 0.0)
 
         # 2. Contracted Pipeline
         row = conn.execute(
-            "SELECT COALESCE(SUM(amount_inr), 0) FROM opportunities WHERE status IN ('approved_for_work', 'in_progress')"
+            f"SELECT COALESCE(SUM(amount_inr), 0) FROM opportunities WHERE status IN ('approved_for_work', 'in_progress') {sandbox_opp}"
         ).fetchone()
         contracted = float(row[0] if row else 0.0)
 
         # 3. Invoiced (unpaid)
         row = conn.execute(
-            "SELECT COALESCE(SUM(amount_total), 0) FROM invoices WHERE status IN ('issued', 'payment_pending')"
+            f"SELECT COALESCE(SUM(amount_total), 0) FROM invoices WHERE status IN ('issued', 'payment_pending') {sandbox_inv}"
         ).fetchone()
         invoiced = float(row[0] if row else 0.0)
 
         # 4. Reconciled & Paid Invoices
         row = conn.execute(
-            "SELECT COALESCE(SUM(amount_total), 0) FROM invoices WHERE status = 'paid'"
+            f"SELECT COALESCE(SUM(amount_total), 0) FROM invoices WHERE status = 'paid' {sandbox_inv}"
         ).fetchone()
         reconciled_paid = float(row[0] if row else 0.0)
 
         # 5. Collected Cash & TDS from Ledger
         tx_rows = conn.execute(
-            "SELECT tx_type, SUM(amount_inr) FROM financial_transactions GROUP BY tx_type"
+            f"SELECT tx_type, SUM(amount_inr) FROM financial_transactions {sandbox_tx} GROUP BY tx_type"
         ).fetchall()
         tx_sums = {r[0]: float(r[1] or 0.0) for r in tx_rows}
         collected_cash = tx_sums.get("client_receipt", 0.0)
