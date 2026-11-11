@@ -23,12 +23,24 @@ from core.commercial_funnel import (
     update_lead_stage,
 )
 from core.config import (
+    DATA_DIR,
     MAX_UPLOAD_MB,
     OLLAMA_MODEL,
     PROJECT_ROOT,
     WORKSPACES_DIR,
     ensure_directories,
     safe_workspace_path,
+)
+from core.upi_engine import (
+    build_upi_payment_url,
+    generate_invoice_upi_qr,
+    generate_upi_qr_bytes,
+    get_active_upi_settings,
+    get_upi_payment_centre_summary,
+    process_merchant_bank_webhook,
+    reconcile_upi_payment_from_bank_credit,
+    save_upi_settings,
+    scan_and_match_statement_for_upi,
 )
 from core.db import (
     VALID_OPPORTUNITY_TRANSITIONS,
@@ -151,6 +163,7 @@ tabs = st.tabs([
     "Opportunity Pipeline",
     "Revenue Operations & Invoicing (M5)",
     "Net Profit Control Centre (M6)",
+    "UPI Payment Centre (M7)",
     "CSV Workbench",
     "Earnings & audit",
 ])
@@ -162,6 +175,7 @@ with tabs[0]:
     with left:
         st.markdown("**Working now**")
         st.markdown(
+            "- **UPI Payment Centre & Dynamic QR Engine (Milestone 7)**: Direct zero-fee UPI collections via standard NPCI dynamic QR/Intent, automated bank statement matching, and fail-closed financial safeguards\n"
             "- **Autonomous Opportunity Discovery (Milestone 4)**: Proactive RSS/Atom XML & JSON API lead intake with zero paid subscriptions\n"
             "- **Capability Matching**: Automated screening against verified analytics capabilities (CSV cleaning, Excel, charts, reports)\n"
             "- **Fraud & Risk Scoring**: Identifies Telegram, crypto scams, unrealistic budgets, and payment bypass attempts\n"
@@ -1447,8 +1461,255 @@ with tabs[5]:
         st.info("No opportunities in pipeline to rank.")
 
 
-# ----------------- Tab 6: CSV Workbench -----------------
+# ----------------- Tab 6: UPI Payment Centre (M7) -----------------
 with tabs[6]:
+    st.subheader("⚡ UPI Payment Centre & Dynamic QR Engine (Milestone 7)")
+    st.caption("Direct UPI collection and dynamic QR generation without payment gateway fees. Instant scannable payment links, bank credit matching, and automated ledger settlement.")
+
+    upi_summary = get_upi_payment_centre_summary()
+    active_upi = upi_summary["upi_settings"]
+
+    # Stage Info Banner
+    if active_upi.get("account_type") == "personal":
+        st.info(
+            "**Active Mode: Stage A — Direct Personal UPI (Zero Software Cost)**\n\n"
+            f"• Linked VPA: `{active_upi['payee_vpa']}` · Payee Name: **{active_upi['payee_name']}** · Bank: **{active_upi.get('bank_name', 'Linked Bank Account')}**\n"
+            "• Payments flow directly into your linked bank account via NPCI UPI QR/Intent without intermediary gateway fees.\n"
+            "• Payment confirmation is verified against bank statement credits or bank app transactions."
+        )
+    else:
+        st.success(
+            f"**Active Mode: Stage B — Merchant UPI Integration ({active_upi.get('account_type', '').title()})**\n\n"
+            f"• Merchant VPA: `{active_upi['payee_vpa']}` · Merchant Code: `{active_upi.get('merchant_code', 'N/A')}`\n"
+            "• Connected to bank merchant transaction webhook and automated settlement feed."
+        )
+
+    # 4 Proposed Headline Metrics
+    kpi1, kpi2, kpi3, kpi4 = st.columns(4)
+    kpi1.metric("1. Invoices Generated", upi_summary["invoices_generated_count"], "Total issued invoices")
+    kpi2.metric("2. Pending Payment", f"₹{upi_summary['pending_invoices_amount_inr']:,.2f}", f"{upi_summary['pending_invoices_count']} invoices awaiting credit")
+    kpi3.metric("3. Confirmed Paid", f"₹{upi_summary['confirmed_reconciled_amount_inr']:,.2f}", f"{upi_summary['confirmed_reconciled_count']} bank-reconciled")
+    kpi4.metric("4. Net Take-Home Profit", f"₹{upi_summary['net_profit_after_tax_inr']:,.2f}", "After actual expenses & tax provision")
+
+    st.divider()
+
+    # Workflow Stepper Diagram
+    with st.expander("ℹ️ How the SOLOEARN UPI Payment Workflow Operates"):
+        st.markdown(
+            "```\n"
+            "1. Generate Invoice   ──> 2. Create Dynamic UPI QR   ──> 3. Customer Scans QR\n"
+            "   (INV-2026-XXXX)           (upi://pay?pa=...&am=...)        (GPay / PhonePe / Paytm)\n"
+            "                                                                     │\n"
+            "7. Net Profit Updated <── 6. Reconcile Automatically <── 5. Bank Account Credited\n"
+            "   (Tax & Take-Home)        (Match Statement Row)            (Direct UPI Settlement)\n"
+            "```\n"
+            "**Key Financial Principle:** SOLOEARN never marks an invoice paid on customer screenshots, UTR messages, or QR scans alone. "
+            "It only marks payment verified when confirmed against the receiving bank account's statement."
+        )
+
+    # Section 1: Dynamic UPI QR Invoice Generator & Viewer
+    st.markdown("### 📱 Dynamic UPI QR Generator & Payment Intent")
+    st.caption("Generate an NPCI-standard dynamic UPI QR code pre-filled with the exact invoice amount, payee VPA, and unique invoice reference.")
+
+    invoices = list_invoices()
+    active_invs = [i for i in invoices if i.get("status") != "cancelled"]
+
+    if active_invs:
+        inv_labels = {
+            f"{i['invoice_number']} · {i['client_name']} · ₹{i['amount_total']:,.2f} ({i['status'].upper()})": i
+            for i in active_invs
+        }
+        chosen_label = st.selectbox("Select Invoice to Generate UPI Payment QR", options=list(inv_labels.keys()), key="upi_qr_invoice_select")
+        chosen_inv = inv_labels[chosen_label]
+
+        upi_qr_data = generate_invoice_upi_qr(chosen_inv, upi_settings=active_upi, save_to_disk=True)
+
+        qr_c1, qr_c2 = st.columns([1, 2])
+        with qr_c1:
+            st.image(upi_qr_data["qr_png_bytes"], caption=f"Scan to Pay: {chosen_inv['invoice_number']}", width=220)
+            st.download_button(
+                "⬇️ Download UPI QR Code (PNG)",
+                data=upi_qr_data["qr_png_bytes"],
+                file_name=f"{chosen_inv['invoice_number']}_upi_qr.png",
+                mime="image/png",
+                use_container_width=True,
+            )
+
+        with qr_c2:
+            st.markdown(
+                f"- **Invoice Number:** `{chosen_inv['invoice_number']}`\n"
+                f"- **Client Name:** {chosen_inv['client_name']}\n"
+                f"- **Exact Amount Due:** **₹{chosen_inv['amount_total']:,.2f}**\n"
+                f"- **Payee UPI VPA:** `{upi_qr_data['payee_vpa']}`\n"
+                f"- **Payee Name:** {upi_qr_data['payee_name']}\n"
+                f"- **Transaction Ref (`tr`):** `{upi_qr_data['transaction_ref']}`\n"
+                f"- **Transaction Note (`tn`):** `{upi_qr_data['transaction_note']}`\n"
+                f"- **Payment Status:** `{chosen_inv['status'].upper()}`\n"
+            )
+            st.code(upi_qr_data["upi_uri"], language="text")
+            st.markdown(
+                f"[📱 Open / Pay with UPI App (GPay / PhonePe / Paytm / BHIM)]({upi_qr_data['upi_uri']})"
+            )
+
+            # View rendered HTML invoice button
+            invoice_html_path = DATA_DIR / "invoices" / f"{chosen_inv['invoice_number']}.html"
+            if invoice_html_path.exists():
+                st.caption(f"HTML Invoice with embedded QR: `{invoice_html_path.name}`")
+                st.download_button(
+                    "📄 Download Print-Ready HTML Invoice",
+                    data=invoice_html_path.read_text(encoding="utf-8"),
+                    file_name=f"{chosen_inv['invoice_number']}.html",
+                    mime="text/html",
+                )
+    else:
+        st.info("No invoices found. Generate an invoice from Tab 4 (Revenue Operations) to view dynamic UPI QR codes.")
+
+    st.divider()
+
+    # Section 2: Statement Reconciliation & Automated UPI Matcher
+    st.markdown("### 🏦 Bank Statement Matching & Automated UPI Settlement")
+    st.caption("Match bank credits directly to pending invoices. Prevents fraud by requiring actual receiving-account statement credits.")
+
+    unrec_rows = list_unreconciled_statement_rows()
+    pending_invs = [i for i in active_invs if i.get("status") in {"issued", "payment_pending"}]
+
+    if unrec_rows and pending_invs:
+        st.write(f"Scanning **{len(unrec_rows)}** unreconciled bank statement rows against **{len(pending_invs)}** pending invoices...")
+        matches = scan_and_match_statement_for_upi(unrec_rows, pending_invs)
+
+        if matches:
+            st.success(f"Found **{len(matches)}** potential UPI payment match(es) in imported statement:")
+            for idx, m in enumerate(matches):
+                with st.container():
+                    st.markdown(
+                        f"**Match #{idx + 1}: Invoice `{m['matched_invoice_number']}` ({m['matched_client_name']})** "
+                        f"matches Statement Entry on `{m['statement_date']}` for **₹{m['statement_amount_inr']:,.2f}**"
+                    )
+                    st.caption(f"Narration: {m['statement_description']} | Bank Ref: {m['statement_bank_ref']} | Match Type: {m['match_type']}")
+                    
+                    match_col1, match_col2 = st.columns([2, 1])
+                    with match_col1:
+                        confirm_box = st.checkbox(
+                            f"I confirm that ₹{m['statement_amount_inr']:,.2f} has cleared in my bank account for {m['matched_invoice_number']}",
+                            key=f"upi_match_confirm_{m['statement_row_id']}_{idx}",
+                        )
+                    with match_col2:
+                        if st.button("✅ Reconcile & Mark Paid", key=f"upi_reconcile_btn_{m['statement_row_id']}_{idx}", type="primary"):
+                            if not confirm_box:
+                                st.error("Please tick the confirmation checkbox to verify bank credit.")
+                            else:
+                                try:
+                                    res = reconcile_upi_payment_from_bank_credit(
+                                        statement_row_id=m["statement_row_id"],
+                                        invoice_number=m["matched_invoice_number"],
+                                        owner_confirmed=True,
+                                    )
+                                    st.success(f"Invoice {m['matched_invoice_number']} successfully reconciled and marked PAID!")
+                                    st.rerun()
+                                except Exception as exc:
+                                    st.error(f"Reconciliation error: {exc}")
+                st.divider()
+        else:
+            st.info("No automatic matches found between statement credits and pending invoices. Check narration or use Tab 5 for manual matching.")
+    elif not unrec_rows:
+        st.info("No unreconciled bank statement rows available. Import your bank statement CSV in Tab 5 to scan for UPI credits.")
+    else:
+        st.info("No pending invoices awaiting payment.")
+
+    st.divider()
+
+    # Section 3: Financial Safeguards & Security Rules
+    st.markdown("### 🛡️ Financial Safeguards & Security Rules")
+    s_col1, s_col2 = st.columns(2)
+    with s_col1:
+        st.markdown(
+            "**What SOLOEARN Will NEVER Do:**\n"
+            "- ❌ Never mark an invoice paid on customer screenshot or UTR message.\n"
+            "- ❌ Never mark paid merely because a QR code was scanned.\n"
+            "- ❌ Never store or ask for your UPI PIN, MPIN, or banking passwords.\n"
+            "- ❌ Never store banking OTPs or automate bank application logins.\n"
+            "- ❌ Never initiate withdrawals or transfers without your authorization."
+        )
+    with s_col2:
+        st.markdown(
+            "**How Security & Integrity Are Maintained:**\n"
+            "- ✅ Customer authorizes payment exclusively on their personal UPI app.\n"
+            "- ✅ Payment proof requires actual receiving-account credit in bank statement.\n"
+            "- ✅ Immutable append-only ledger prevents duplicate reference reuse.\n"
+            "- ✅ Post-tax net profit and tax reserves update only upon cleared funds."
+        )
+
+    st.divider()
+
+    # Section 4: UPI Settings Configuration
+    st.markdown("### ⚙️ UPI Payment Configuration")
+    st.caption("Configure your receiving UPI Virtual Payment Address (VPA), payee name, and mode.")
+
+    with st.form("upi_settings_form"):
+        cfg_vpa = st.text_input("Receiving UPI ID / VPA", value=active_upi.get("payee_vpa", "soloearn@upi"), help="Your personal or merchant UPI address (e.g. yourname@okhdfcbank or business@upi)")
+        cfg_name = st.text_input("Payee Business / Personal Name", value=active_upi.get("payee_name", "SOLOEARN Operations"), help="Name displayed to customers on their UPI payment screen")
+        cfg_type = st.selectbox(
+            "Account Integration Mode",
+            options=["personal", "merchant_bank_api", "gateway"],
+            index=["personal", "merchant_bank_api", "gateway"].index(active_upi.get("account_type", "personal")),
+            format_func=lambda x: {
+                "personal": "Stage A: Personal UPI (Zero Software Cost - Manual / Statement Reconciled)",
+                "merchant_bank_api": "Stage B: Merchant UPI through Bank (Bank Transaction API / Webhook)",
+                "gateway": "Stage C: Third-Party Payment Gateway (Razorpay / Cashfree)",
+            }[x],
+        )
+        cfg_bank = st.text_input("Linked Bank Name", value=active_upi.get("bank_name", "Bank Linked UPI"))
+        cfg_mc = st.text_input("Merchant Category Code (MCC, Optional)", value=active_upi.get("merchant_code", ""), help="Optional 4-digit MCC code (e.g. 8931 for IT/Data processing)")
+        cfg_secret = st.text_input("Webhook HMAC Secret (Stage B/C)", value=active_upi.get("webhook_secret", ""), type="password", help="Secret key for verifying bank or gateway webhook signatures")
+
+        save_upi_btn = st.form_submit_button("Save UPI Settings", type="primary")
+        if save_upi_btn:
+            try:
+                updated_settings = save_upi_settings(
+                    payee_vpa=cfg_vpa,
+                    payee_name=cfg_name,
+                    account_type=cfg_type,
+                    merchant_code=cfg_mc,
+                    bank_name=cfg_bank,
+                    webhook_secret=cfg_secret,
+                )
+                st.success("UPI settings saved successfully!")
+                st.rerun()
+            except Exception as e:
+                st.error(f"Error saving UPI settings: {e}")
+
+    # Section 5: Stage B Bank Merchant Webhook Simulator
+    with st.expander("🔌 Stage B — Bank Merchant Onboarding & Webhook Simulator"):
+        st.markdown(
+            "Once your acquiring bank approves merchant UPI onboarding, you receive a business VPA and automated transaction notifications. "
+            "Use this simulator to test incoming bank transaction callbacks with HMAC signature verification."
+        )
+        sim_col1, sim_col2 = st.columns(2)
+        with sim_col1:
+            sim_event_id = st.text_input("Webhook Event ID", value="EVT_UPI_2026_001", key="sim_evt_id")
+            sim_inv_num = st.text_input("Invoice Number", value="INV-2026-0001", key="sim_inv_num")
+            sim_amt = st.number_input("Amount (₹)", value=5000.0, step=500.0, key="sim_amt")
+            sim_ref = st.text_input("Bank UTR / Transaction Ref", value="402511223344", key="sim_ref")
+        with sim_col2:
+            st.markdown("**Simulated Webhook Payload**")
+            test_payload = {
+                "event_id": sim_event_id,
+                "invoice_number": sim_inv_num,
+                "amount_inr": sim_amt,
+                "transaction_ref": sim_ref,
+                "status": "success",
+            }
+            st.json(test_payload)
+            if st.button("Simulate Bank Webhook Callback"):
+                try:
+                    res = process_merchant_bank_webhook(test_payload)
+                    st.success(f"Webhook processed: {res['status']} — {res['message']}")
+                except Exception as exc:
+                    st.error(f"Webhook processing error: {exc}")
+
+
+# ----------------- Tab 7: CSV Workbench -----------------
+with tabs[7]:
     st.subheader("CSV → business deliverables")
     st.write("Upload a CSV you own or are authorized to process. The worker creates a cleaned CSV, an Excel workbook, data-quality profile, charts and an HTML report.")
     uploaded = st.file_uploader("Choose a CSV file", type=["csv"], help=f"Maximum {MAX_UPLOAD_MB} MB and 250,000 rows in this MVP.")
@@ -1503,8 +1764,8 @@ with tabs[6]:
         st.dataframe(pd.DataFrame(tasks)[["id", "title", "status", "artifact_path", "created_at"]], use_container_width=True, hide_index=True)
 
 
-# ----------------- Tab 7: Earnings & Audit -----------------
-with tabs[7]:
+# ----------------- Tab 8: Earnings & Audit -----------------
+with tabs[8]:
     st.subheader("Record income")
     st.caption("This form records expected or invoiced values only. Record paid receipts through the invoice workflow after independently checking your bank statement and payment reference.")
     with st.form("revenue_form", clear_on_submit=True):

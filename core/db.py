@@ -262,6 +262,34 @@ def init_db() -> None:
                 confirmed_at TEXT,
                 created_at TEXT NOT NULL
             );
+
+            CREATE TABLE IF NOT EXISTS upi_payment_settings (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                payee_vpa TEXT NOT NULL,
+                payee_name TEXT NOT NULL,
+                account_type TEXT NOT NULL DEFAULT 'personal',
+                merchant_code TEXT DEFAULT '',
+                bank_name TEXT DEFAULT '',
+                auto_reconcile_statement INTEGER NOT NULL DEFAULT 1,
+                webhook_secret TEXT DEFAULT '',
+                is_active INTEGER NOT NULL DEFAULT 1,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS merchant_webhook_logs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                event_id TEXT NOT NULL,
+                provider TEXT NOT NULL DEFAULT 'bank_upi_merchant',
+                invoice_number TEXT DEFAULT '',
+                transaction_ref TEXT DEFAULT '',
+                amount_inr REAL NOT NULL DEFAULT 0.0,
+                status TEXT NOT NULL DEFAULT 'received',
+                raw_payload TEXT DEFAULT '',
+                signature_valid INTEGER NOT NULL DEFAULT 0,
+                processed_at TEXT,
+                created_at TEXT NOT NULL
+            );
             """
         )
         # Check column migrations in existing tables
@@ -290,6 +318,18 @@ def init_db() -> None:
         if "accounting_method" not in tax_cols:
             conn.execute(
                 "ALTER TABLE tax_profiles ADD COLUMN accounting_method TEXT NOT NULL DEFAULT 'cash'"
+            )
+
+        # Seed default UPI profile if empty
+        row_upi = conn.execute("SELECT id FROM upi_payment_settings LIMIT 1").fetchone()
+        if not row_upi:
+            now_str = utc_now()
+            conn.execute(
+                """INSERT INTO upi_payment_settings (
+                    payee_vpa, payee_name, account_type, merchant_code, bank_name,
+                    auto_reconcile_statement, webhook_secret, is_active, created_at, updated_at
+                ) VALUES ('soloearn@upi', 'SOLOEARN Operations', 'personal', '', 'Bank Linked UPI', 1, '', 1, ?, ?)""",
+                (now_str, now_str),
             )
 
 

@@ -35,6 +35,30 @@ def render_invoice_html(invoice: dict[str, Any], output_dir: Path | None = None)
 
     badge_color = "#10b981" if status == "PAID" else "#f59e0b" if status == "ISSUED" else "#ef4444"
 
+    upi_card_html = ""
+    try:
+        from core.upi_engine import generate_invoice_upi_qr
+        upi_info = generate_invoice_upi_qr(invoice, save_to_disk=True)
+        upi_card_html = f"""
+    <div style="margin-top: 24px; padding: 20px; background: #f0fdf4; border: 1px solid #bbf7d0; border-radius: 10px; display: flex; gap: 24px; align-items: center;">
+      <div>
+        <img src="{upi_info['qr_data_uri']}" width="130" height="130" alt="Dynamic UPI QR Code" style="border: 2px solid #166534; border-radius: 8px; background: #ffffff; padding: 4px;" />
+      </div>
+      <div style="flex: 1;">
+        <div style="display: flex; align-items: center; gap: 8px; margin-bottom: 6px;">
+          <span style="background: #166534; color: #ffffff; font-size: 11px; font-weight: 800; padding: 2px 8px; border-radius: 4px; text-transform: uppercase;">Instant UPI Payment</span>
+          <span style="font-size: 12px; color: #166534; font-weight: 600;">Zero Gateway Fees · Direct Bank Transfer</span>
+        </div>
+        <p style="margin: 0 0 4px 0; font-size: 14px; font-weight: 700; color: #0f172a;">Scan with Google Pay, PhonePe, Paytm, or BHIM</p>
+        <p style="margin: 0 0 4px 0; font-size: 13px; color: #334155;"><strong>Payee:</strong> {html.escape(upi_info['payee_name'])} · <code style="background: #e2e8f0; padding: 2px 6px; border-radius: 4px;">{html.escape(upi_info['payee_vpa'])}</code></p>
+        <p style="margin: 0 0 8px 0; font-size: 13px; color: #334155;"><strong>Exact Amount:</strong> ₹{total:,.2f} · <strong>Reference:</strong> {inv_num}</p>
+        <a href="{upi_info['upi_uri']}" style="display: inline-block; padding: 8px 14px; background: #166534; color: #ffffff; text-decoration: none; border-radius: 6px; font-weight: 600; font-size: 13px;">📱 Open in UPI App</a>
+      </div>
+    </div>
+    """
+    except Exception:
+        upi_card_html = ""
+
     html_content = f"""<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -218,6 +242,8 @@ def render_invoice_html(invoice: dict[str, Any], output_dir: Path | None = None)
       </div>
     </div>
   </div>
+
+  {upi_card_html}
 
   <div class="payment-box">
     <h4 style="margin: 0 0 8px 0; color: #0f172a; font-size: 13px;">Payment Instructions</h4>

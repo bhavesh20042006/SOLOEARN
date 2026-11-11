@@ -10,6 +10,7 @@ load_dotenv(PROJECT_ROOT / ".env")
 DATA_DIR = PROJECT_ROOT / "data"
 WORKSPACES_DIR = PROJECT_ROOT / "workspaces"
 LEADS_DROPZONE_DIR = DATA_DIR / "leads_dropzone"
+UPI_QR_DIR = DATA_DIR / "upi_qr"
 DB_PATH = DATA_DIR / "soloearn.sqlite3"
 OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "http://127.0.0.1:11434").rstrip("/")
 OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "qwen3:4b-instruct")
@@ -21,6 +22,7 @@ def ensure_directories() -> None:
     DATA_DIR.mkdir(parents=True, exist_ok=True)
     WORKSPACES_DIR.mkdir(parents=True, exist_ok=True)
     LEADS_DROPZONE_DIR.mkdir(parents=True, exist_ok=True)
+    UPI_QR_DIR.mkdir(parents=True, exist_ok=True)
 
 
 def safe_workspace_path(*parts: str | Path) -> Path:

@@ -10,5 +10,7 @@ workspaces/*
 !workspaces/.gitkeep
 data/invoices/*
 !data/invoices/.gitkeep
+data/upi_qr/*
+!data/upi_qr/.gitkeep
 *.zip
 .DS_Store

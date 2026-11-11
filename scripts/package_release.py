@@ -4,6 +4,9 @@ from pathlib import Path
 
 root = Path(r"C:\Users\BHAVESH KHULLAR\Downloads\SOLOEARN_v0.1\SOLOEARN")
 out_zips = [
+    Path(r"C:\Users\BHAVESH KHULLAR\Desktop\SOLOEARN_Milestone7_Ready.zip"),
+    Path(r"C:\Users\BHAVESH KHULLAR\Downloads\SOLOEARN_Milestone7_Ready.zip"),
+    Path(r"C:\Users\BHAVESH KHULLAR\Downloads\SOLOEARN_v0.1\SOLOEARN_Milestone7_Ready.zip"),
     Path(r"C:\Users\BHAVESH KHULLAR\Desktop\SOLOEARN_Milestone6.3_Ready.zip"),
     Path(r"C:\Users\BHAVESH KHULLAR\Downloads\SOLOEARN_Milestone6.3_Ready.zip"),
     Path(r"C:\Users\BHAVESH KHULLAR\Downloads\SOLOEARN_v0.1\SOLOEARN_Milestone6.3_Ready.zip"),
@@ -34,11 +37,11 @@ def get_files_to_pack():
                 files.append((cur_path / ".gitkeep", "workspaces/.gitkeep"))
             continue
 
-        # Prune data/invoices directory contents except .gitkeep
-        if len(rel_dir.parts) >= 2 and rel_dir.parts[0] == "data" and rel_dir.parts[1] == "invoices":
+        # Prune data/invoices and data/upi_qr directory contents except .gitkeep
+        if len(rel_dir.parts) >= 2 and rel_dir.parts[0] == "data" and rel_dir.parts[1] in {"invoices", "upi_qr"}:
             dirs.clear()
             if ".gitkeep" in filenames:
-                files.append((cur_path / ".gitkeep", "data/invoices/.gitkeep"))
+                files.append((cur_path / ".gitkeep", f"data/{rel_dir.parts[1]}/.gitkeep"))
             continue
 
         for f in filenames:
