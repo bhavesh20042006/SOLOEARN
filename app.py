@@ -279,9 +279,9 @@ with tabs[1]:
                 f"  - **Enforcement:** `{g['enforcement_point']}` · Approved: `{g['approved_count']}` | Pending: `{g['pending_count']}`"
             )
 
-    # Expandable Commercial Launch Gate M7.0.2 Checklist (7 Owner Confirmations)
+    # Expandable Commercial Launch Gate M7.0.2 Checklist (9 Owner Confirmations)
     launch_summary = get_launch_checklist_summary()
-    with st.expander(f"🚦 Commercial Launch Gate M7.0.2 Checklist ({launch_summary['owner_confirmed_count']}/{launch_summary['total_items']} Owner Confirmed · {launch_summary['code_tested_count']}/7 Code-Tested)", expanded=True):
+    with st.expander(f"🚦 Commercial Launch Gate M7.0.2: SOLOEARN — First Commercial Launch Checklist (Track actual-world progress: {launch_summary['owner_confirmed_count']}/{launch_summary['total_items']} Owner Confirmed · {launch_summary['code_tested_count']}/{launch_summary['total_items']} Code-Tested)", expanded=True):
         st.markdown(
             "**Operational Launch Gate Standard:** Automated tests prove the software algorithms function; they do **not** prove that a bank account is active, "
             "that Kotak.biz is approved, or that a customer has paid you. Before live payment collection or commercial launch, the owner must explicitly confirm "
@@ -1774,6 +1774,11 @@ with tabs[6]:
     # Section 1: Dynamic UPI QR Invoice Generator & Viewer
     st.markdown("### 📱 Dynamic UPI QR Generator & Payment Intent")
     st.caption("Generate an NPCI-standard dynamic UPI QR code pre-filled with the exact invoice amount, payee VPA, and unique invoice reference.")
+    st.warning(
+        "⚠️ **Mode 01 Dynamic UPI QR Distinction:** Mode 01 specifies QR Code initiation. It does not, by itself, "
+        "prove that the QR is an acquiring-bank-issued dynamic merchant QR or that the bank is supplying payment confirmation. "
+        "Keep the locally generated QR in demonstration or sandbox mode until Kotak approves your merchant collection facility."
+    )
 
     invoices = list_invoices()
     active_invs = [i for i in invoices if i.get("status") != "cancelled"]

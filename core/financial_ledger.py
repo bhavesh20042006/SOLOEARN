@@ -297,7 +297,11 @@ def apply_customer_advance(
     """
     Applies a previously received customer advance towards a completed, accepted invoice.
     Reduces the unearned customer advance liability and recognizes earned client_receipt revenue.
+    Atomically updates invoice amount_paid and status to prevent double-billing.
     """
+    if amount_inr <= 0 or not math.isfinite(amount_inr):
+        raise ValueError("Applied advance amount must be positive and finite")
+
     desc = description or f"Applied customer advance towards invoice {invoice_number}"
     applied_tx_id = record_ledger_transaction(
         tx_type="customer_advance_applied",
@@ -317,6 +321,24 @@ def apply_customer_advance(
         linked_tx_id=applied_tx_id,
         is_sandbox=is_sandbox,
     )
+
+    # Synchronize invoice record so outstanding balance does not double-count
+    with connect() as conn:
+        inv = conn.execute(
+            "SELECT id, amount_total, amount_paid FROM invoices WHERE invoice_number = ?",
+            (invoice_number,),
+        ).fetchone()
+        if inv:
+            current_paid = float(inv["amount_paid"] or 0.0)
+            total_due = float(inv["amount_total"] or 0.0)
+            new_paid = round(current_paid + amount_inr, 2)
+            new_status = "paid" if new_paid >= total_due - 0.01 else "payment_pending"
+            conn.execute(
+                "UPDATE invoices SET amount_paid = ?, status = ? WHERE invoice_number = ?",
+                (new_paid, new_status, invoice_number),
+            )
+            conn.commit()
+
     return applied_tx_id
 
 
@@ -789,7 +811,13 @@ def reconcile_statement_row(
         if int(st_row["is_reconciled"] or 0) == 1:
             raise ValueError(f"Bank statement row #{row_id} has already been reconciled")
 
-        tx_direction = str(st_row["tx_type"]).lower()
+        raw_tx_type = str(st_row["tx_type"]).lower().strip()
+        if raw_tx_type in {"credit", "cr"}:
+            tx_direction = "credit"
+        elif raw_tx_type in {"debit", "dr"}:
+            tx_direction = "debit"
+        else:
+            tx_direction = raw_tx_type
         amount = round(float(st_row["amount_inr"]), 2)
         if amount <= 0 or not math.isfinite(amount):
             raise ValueError("Bank statement amount must be positive and finite")
@@ -810,13 +838,15 @@ def reconcile_statement_row(
                 raise ValueError(f"Invoice '{entity_id}' was not found")
             if inv["status"] not in {"issued", "payment_pending"}:
                 raise ValueError(f"Invoice {inv['invoice_number']} is not awaiting payment")
-            expected = round(float(inv["amount_total"]), 2)
+            current_paid = round(float(inv["amount_paid"] or 0.0), 2)
+            expected_remaining = round(float(inv["amount_total"]) - current_paid, 2)
             settled_amount = round(amount + tds_val, 2)
-            if abs(settled_amount - expected) >= 0.01:
+            if abs(settled_amount - expected_remaining) >= 0.01:
                 raise ValueError(
                     f"Bank credit ₹{amount:,.2f} + TDS withheld ₹{tds_val:,.2f} (Total: ₹{settled_amount:,.2f}) "
-                    f"does not exactly settle invoice total ₹{expected:,.2f}. Partial/over-payments are not supported yet; "
-                    "leave this row unreconciled."
+                    f"does not exactly settle invoice total (remaining balance ₹{expected_remaining:,.2f}, "
+                    f"total ₹{float(inv['amount_total']):,.2f}, already paid ₹{current_paid:,.2f}). "
+                    "Partial/over-payments are not supported yet; leave this row unreconciled."
                 )
             if bank_ref:
                 duplicate_ref = conn.execute(
@@ -881,9 +911,9 @@ def reconcile_statement_row(
             inv_num = str(inv["invoice_number"])
             conn.execute(
                 """UPDATE invoices
-                   SET status='paid', paid_at=?, payment_reference=?, payment_verified_by_owner=1
+                   SET status='paid', paid_at=?, payment_reference=?, payment_verified_by_owner=1, amount_paid=?
                    WHERE id=? AND status IN ('issued','payment_pending')""",
-                (now, ref_for_row, inv_id),
+                (now, ref_for_row, float(inv["amount_total"]), inv_id),
             )
             opp_id = int(inv["opportunity_id"])
             task_id = inv["task_id"]
@@ -907,32 +937,35 @@ def reconcile_statement_row(
                     ),
                 )
 
+            # Direct revenue and tax settled in this specific statement row (including client TDS)
+            tax_rate = float(inv["tax_rate"] or 0.0)
+            credit_subtotal = round(settled_amount / (1.0 + tax_rate / 100.0), 2)
+            credit_tax = round(settled_amount - credit_subtotal, 2)
+
             existing_tx = conn.execute(
-                "SELECT id FROM financial_transactions WHERE reference_id=? AND tx_type='client_receipt'",
-                (inv_num,),
+                "SELECT id FROM financial_transactions WHERE reference_id=? AND description LIKE ? AND tx_type='client_receipt'",
+                (inv_num, f"%Statement row #{row_id}%"),
             ).fetchone()
             if not existing_tx:
-                subtotal = round(float(inv["amount_subtotal"]), 2)
-                tax_amt = round(float(inv["tax_amount"]), 2)
                 conn.execute(
                     """INSERT INTO financial_transactions (
                         tx_date, tx_type, amount_inr, amount_paise, currency,
                         reference_id, description, is_reversal, is_sandbox, created_at
                     ) VALUES (?, 'client_receipt', ?, ?, 'INR', ?, ?, 0, ?, ?)""",
                     (
-                        str(st_row["tx_date"])[:10], subtotal, inr_to_paise(subtotal),
-                        inv_num, f"Reconciled client receipt for {inv_num} ({inv['client_name']})", is_sb, now,
+                        str(st_row["tx_date"])[:10], credit_subtotal, inr_to_paise(credit_subtotal),
+                        inv_num, f"Reconciled client receipt for {inv_num} ({inv['client_name']}) - Statement row #{row_id}", is_sb, now,
                     ),
                 )
-                if tax_amt > 0:
+                if credit_tax > 0:
                     conn.execute(
                         """INSERT INTO financial_transactions (
                             tx_date, tx_type, amount_inr, amount_paise, currency,
                             reference_id, description, is_reversal, is_sandbox, created_at
                         ) VALUES (?, 'gst_collected', ?, ?, 'INR', ?, ?, 0, ?, ?)""",
                         (
-                            str(st_row["tx_date"])[:10], tax_amt, inr_to_paise(tax_amt),
-                            inv_num, f"GST collected on {inv_num}", is_sb, now,
+                            str(st_row["tx_date"])[:10], credit_tax, inr_to_paise(credit_tax),
+                            inv_num, f"GST collected on {inv_num} - Statement row #{row_id}", is_sb, now,
                         ),
                     )
                 if tds_val > 0:
@@ -1170,9 +1203,12 @@ def get_cash_and_reserves_summary(
         ).fetchone()
         unpaid_bills = round(float(unpaid_row[0] if unpaid_row else 0.0), 2)
 
-        # Bank balance calculation
+        # Bank balance calculation (prevent double-counting applied advances and withholdings)
         if bank_balance_known:
-            total_cash_in = all_collected_receipts + customer_advance_in + gst_collected + other_cash_in
+            tds_credits_ledger = tx_sums.get("tds_credit", 0.0)
+            bank_cash_receipts = max(0.0, round(all_collected_receipts - tds_credits_ledger, 2))
+            unapplied_advance = max(0.0, customer_advance_in - customer_advance_applied)
+            total_cash_in = bank_cash_receipts + unapplied_advance + gst_collected + other_cash_in
             total_cash_out = paid_expenses + refunds_paid + owner_draws + tax_payments + platform_fees + gst_paid + other_cash_out
             bank_balance = round(opening_balance + total_cash_in - total_cash_out, 2)
         else:

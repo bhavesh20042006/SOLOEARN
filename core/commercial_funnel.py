@@ -110,94 +110,119 @@ def init_commercial_tables() -> None:
 LAUNCH_CHECKLIST_DEFINITIONS: list[dict[str, Any]] = [
     {
         "step_number": 1,
-        "item_key": "business_account_approval",
-        "title": "Actual Business Current Account Approval",
-        "category": "Banking & Compliance",
-        "verification_type": "EXTERNAL_BANK_VERIFICATION",
-        "code_test_details": "Kotak statement parser, balance formulas, import logic, and duplicate checks verified across 197 automated tests.",
+        "item_key": "udyam_registration",
+        "title": "Complete Udyam Registration Using Genuine Business Activities",
+        "category": "Regulatory & Legal",
+        "verification_type": "EXTERNAL_GOVT_PORTAL",
+        "code_test_details": "Statutory NIC 2008 alignment verified (62011, 62020, 63111 primary, 63112 conditional).",
         "instruction_guide": (
-            "Visit Kotak Mahindra Bank branch with Udyam Registration Certificate (NIC 62011/62020/63111) and second business proof "
-            "as mandated by RBI Master Directions on KYC for sole proprietorships. Confirm Safalta account approval (₹5,000 AQB under Neo scheme) "
-            "in writing and obtain the official Current Account number and NetBanking credentials. Do not rely on personal savings KYC."
+            "File free registration at https://udyamregistration.gov.in/ as an individual sole proprietorship. "
+            "Select only genuine activities: NIC 63111 (Data processing, including report writing) and NIC 62011/62020. "
+            "Do NOT select 63112 (Web hosting) unless actually offering server hosting. Never pay private intermediaries."
         ),
     },
     {
         "step_number": 2,
-        "item_key": "merchant_qr_activation",
-        "title": "Merchant QR & Kotak.biz Activation",
-        "category": "Banking & Compliance",
-        "verification_type": "EXTERNAL_BANK_VERIFICATION",
-        "code_test_details": "Mode 01 dynamic UPI QR generation, Mode 04 Intent URLs, and statutory non-GST invoice notice tested and verified.",
+        "item_key": "kotak_written_confirmation",
+        "title": "Visit Kotak & Obtain Written Confirmation of Safalta Eligibility & Required Documents",
+        "category": "Banking & Legal",
+        "verification_type": "EXTERNAL_BANK_BRANCH",
+        "code_test_details": "RBI Master Directions on KYC (revised Oct 1, 2026) sole-proprietor 2-document rule codified.",
         "instruction_guide": (
-            "Download Kotak.biz merchant app. Link it to the approved Current Account. Obtain the merchant VPA and dynamic QR capabilities. "
-            "Perform a small test scan if permitted by the bank. Status remains PENDING until bank activates merchant acquiring."
+            "Visit Kotak Mahindra Bank branch in person. Ask branch manager: 'Can I open a Safalta Current Account under the Neo scheme "
+            "as a sole proprietor providing data analytics & processing?' Ask for their exact list of accepted second KYC documents "
+            "(e.g. Shop & Establishment, GST, or CA certificate). Do not assume personal savings KYC automatically suffices."
         ),
     },
     {
         "step_number": 3,
-        "item_key": "first_real_prospect_contacted",
-        "title": "First Real Prospect Contacted",
-        "category": "Sales & Acquisition",
-        "verification_type": "EXTERNAL_PROSPECT_VERIFICATION",
-        "code_test_details": "Lead manager, 5 researched SMB targets (Snitch, Blue Tokai, Mokobara, Slurrp Farm, Koparo Clean), and Outreach Logger verified.",
+        "item_key": "kotak_aqb_and_charges_confirmed",
+        "title": "Confirm the ₹5,000 AQB, Opening Funding and All Applicable Charges",
+        "category": "Banking & Financial",
+        "verification_type": "EXTERNAL_BANK_BRANCH",
+        "code_test_details": "Neo scheme non-maintenance charge schedule (₹500 for ₹2.5k–₹5k; ₹1,000 for <₹2.5k) codified in preflight.",
         "instruction_guide": (
-            "Select an initial target account from Tab 1 (e.g. Slurrp Farm or Koparo Clean). Transmit the humble, question-led discovery message "
-            "to the verified founder or decision maker via LinkedIn/email. Record the interaction in the Outreach Logger."
+            "Obtain written schedule of charges: verify ₹5,000 Average Quarterly Balance requirement, initial account-opening cheque amount, "
+            "and shortfall fees (₹500/quarter if balance is ₹2.5k–₹5k, ₹1,000/quarter if below ₹2.5k). Confirm no hidden monthly ledger fees."
         ),
     },
     {
         "step_number": 4,
-        "item_key": "written_pilot_agreement",
-        "title": "Written Pilot Agreement & Scope Confirmation",
-        "category": "Sales & Acquisition",
-        "verification_type": "EXTERNAL_CLIENT_VERIFICATION",
-        "code_test_details": "Approval Gate 1 (proposal quote) and Gate 2 (scope/contract authorization) enforced; non-GST statutory wording verified.",
+        "item_key": "open_business_current_account",
+        "title": "Open the Business Current Account If Terms Are Affordable",
+        "category": "Banking & Financial",
+        "verification_type": "EXTERNAL_BANK_BRANCH",
+        "code_test_details": "Multi-account ledger, bank statement import parser, and opening balance calibration verified across 200+ tests.",
         "instruction_guide": (
-            "Hold discovery discussion. Agree on tightly scoped ₹5,000 ex-GST pilot deliverable (e.g. multi-channel order reconciliation or return analysis). "
-            "Obtain written client confirmation of scope and price before initiating any deliverable work."
+            "Submit application with Udyam certificate and approved second business proof. Fund initial opening deposit. "
+            "Receive official business account number, NetBanking credentials, and branch welcome letter. Enter opening balance in SOLOEARN."
         ),
     },
     {
         "step_number": 5,
-        "item_key": "actual_work_completed_and_accepted",
-        "title": "Actual Work Completed & Accepted by Client",
-        "category": "Delivery & QA",
-        "verification_type": "EXTERNAL_CLIENT_VERIFICATION",
-        "code_test_details": "Automated multi-check formula QA engine, deliverable packager, and Gate 5 human owner signoff verified.",
+        "item_key": "activate_kotak_biz_merchant_qr",
+        "title": "Activate Kotak.biz & Obtain an Approved Merchant QR",
+        "category": "Payment & Collection",
+        "verification_type": "EXTERNAL_BANK_ACQUIRING",
+        "code_test_details": "NPCI Mode 01 Dynamic QR and Mode 04 Intent generator verified in demonstration/pilot mode.",
         "instruction_guide": (
-            "Process client dataset (NIC 63111). Execute multi-check formula QA to guarantee zero spreadsheet errors. Package deliverable zip, "
-            "sign off at Gate 5, and dispatch to client. Receive formal client acceptance without dispute or revision requests."
+            "Download Kotak.biz merchant app. Onboard using active current account credentials. Obtain approved acquiring-bank merchant VPA "
+            "and dynamic QR collection facility. Keep locally generated QR in demo mode until bank merchant rail is officially active."
         ),
     },
     {
         "step_number": 6,
-        "item_key": "verified_bank_credit",
-        "title": "Verified Bank Credit in NetBanking Statement",
-        "category": "Financial Settlement",
-        "verification_type": "EXTERNAL_BANK_VERIFICATION",
-        "code_test_details": "Kotak NetBanking statement CSV parser, 12-digit UTR extraction, duplicate protection, and debit rejection verified.",
+        "item_key": "send_first_five_approaches",
+        "title": "Send the First Five Genuine, Personalised Customer Approaches",
+        "category": "Sales & Outreach",
+        "verification_type": "EXTERNAL_PROSPECT_OUTREACH",
+        "code_test_details": "Lead manager, 5 researched SMB targets (Snitch, Blue Tokai, Mokobara, Slurrp Farm, Koparo Clean), and Outreach Logger verified.",
         "instruction_guide": (
-            "Client executes UPI payment against invoice Mode 01 QR. Log in to Kotak NetBanking and download the official transaction CSV statement. "
-            "Confirm ₹5,000 credit entry with valid 12-digit UPI UTR. Never accept WhatsApp screenshots, payment claims, or SMS as proof of payment."
+            "From Tab 1, send personalized, question-led discovery approaches to verified founders/decision makers. "
+            "Focus on practical multi-channel data cleansing and reconciliation pain points. Log channel, date, and response in the Outreach Logger."
         ),
     },
     {
         "step_number": 7,
-        "item_key": "successful_soloearn_reconciliation",
-        "title": "Successful SOLOEARN System Reconciliation",
-        "category": "Financial Settlement",
-        "verification_type": "SYSTEM_INTEGRATION_VERIFICATION",
-        "code_test_details": "Automated statement matcher, invoice payment verification, Section 202 tax reserve allocation, and ledger updates verified in sandbox.",
+        "item_key": "secure_written_pilot_agreement",
+        "title": "Secure One Written ₹5,000 Pilot Agreement",
+        "category": "Sales & Contracting",
+        "verification_type": "EXTERNAL_CLIENT_AGREEMENT",
+        "code_test_details": "Gate 1 (proposal quote) and Gate 2 (contract authorization) enforced; statutory non-GST wording verified.",
         "instruction_guide": (
-            "Upload live Kotak statement CSV into Tab 6. Execute reconciliation at Gate 3. Confirm invoice transitions to 'paid', "
-            "Section 202 tax reserve is set aside, and actual unvarnished post-tax profit updates on the Commercial Dashboard."
+            "Conclude discovery discussion. Secure explicit written agreement (email/signed quote) for tightly scoped ₹5,000 ex-GST pilot. "
+            "Define deliverables: 1 clean multi-channel Excel model, 1 summary dashboard, and 1 insight memo. Authorize scope at Gate 2."
+        ),
+    },
+    {
+        "step_number": 8,
+        "item_key": "complete_work_and_obtain_acceptance",
+        "title": "Complete the Customer's Work and Obtain Acceptance",
+        "category": "Delivery & QA",
+        "verification_type": "EXTERNAL_CLIENT_SIGNOFF",
+        "code_test_details": "Multi-check automated QA engine, deliverable packager, and Gate 5 human owner signoff verified.",
+        "instruction_guide": (
+            "Execute data processing (NIC 63111). Run automated QA checks to ensure 0 formula errors. Package deliverable zip, "
+            "sign off at Gate 5, dispatch to client, and receive formal written client acceptance without dispute or revision requests."
+        ),
+    },
+    {
+        "step_number": 9,
+        "item_key": "verify_bank_credit_and_reconcile",
+        "title": "Verify the Cleared Bank Credit and Reconcile It in SOLOEARN",
+        "category": "Financial Settlement",
+        "verification_type": "EXTERNAL_BANK_RECONCILIATION",
+        "code_test_details": "Kotak NetBanking statement CSV parser, 12-digit UTR extraction, duplicate protection, and Section 202 tax reserve verified.",
+        "instruction_guide": (
+            "Customer pays ₹5,000 via approved merchant UPI QR. Download official Kotak NetBanking CSV statement. Confirm ₹5,000 credit "
+            "with valid 12-digit UTR. Import CSV into Tab 6, reconcile at Gate 3. Confirm invoice transitions to 'paid' and net profit updates."
         ),
     },
 ]
 
 
 def init_commercial_launch_checklist(conn=None) -> None:
-    """Initializes the 7-item Commercial Launch Gate M7.0.2 checklist table."""
+    """Initializes and synchronizes the 9-item Commercial Launch Gate checklist table."""
     def _run(c):
         c.execute(
             """CREATE TABLE IF NOT EXISTS commercial_launch_checklist (
@@ -218,10 +243,10 @@ def init_commercial_launch_checklist(conn=None) -> None:
                 created_at TEXT NOT NULL
             );"""
         )
-        existing = {r["item_key"] for r in c.execute("SELECT item_key FROM commercial_launch_checklist").fetchall()}
+        existing_keys = {r["item_key"] for r in c.execute("SELECT item_key FROM commercial_launch_checklist").fetchall()}
         now = utc_now()
         for item in LAUNCH_CHECKLIST_DEFINITIONS:
-            if item["item_key"] not in existing:
+            if item["item_key"] not in existing_keys:
                 c.execute(
                     """INSERT INTO commercial_launch_checklist (
                         item_key, step_number, title, category, verification_type,
@@ -239,6 +264,25 @@ def init_commercial_launch_checklist(conn=None) -> None:
                         now,
                     ),
                 )
+            else:
+                c.execute(
+                    """UPDATE commercial_launch_checklist
+                       SET step_number = ?, title = ?, category = ?, verification_type = ?,
+                           code_test_details = ?, instruction_guide = ?
+                       WHERE item_key = ?""",
+                    (
+                        item["step_number"],
+                        item["title"],
+                        item["category"],
+                        item["verification_type"],
+                        item["code_test_details"],
+                        item["instruction_guide"],
+                        item["item_key"],
+                    ),
+                )
+        # Clean up obsolete legacy items not in the 9-step list
+        valid_keys = tuple(item["item_key"] for item in LAUNCH_CHECKLIST_DEFINITIONS)
+        c.execute(f"DELETE FROM commercial_launch_checklist WHERE item_key NOT IN ({','.join('?' for _ in valid_keys)})", valid_keys)
     if conn is not None:
         _run(conn)
     else:
