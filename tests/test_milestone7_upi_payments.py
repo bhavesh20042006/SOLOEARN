@@ -48,6 +48,10 @@ from core.upi_engine import (
     scan_and_match_statement_for_upi,
     validate_vpa,
 )
+from core.preflight import (
+    get_kotak_onboarding_guide,
+    run_m7_local_preflight,
+)
 
 
 class Milestone7UPIPaymentsTests(unittest.TestCase):
@@ -710,6 +714,48 @@ class Milestone7UPIPaymentsTests(unittest.TestCase):
         self.assertEqual(m["match_type"], "ambiguous_multiple_candidates_same_amount")
         self.assertTrue(m.get("is_ambiguous", False))
         self.assertEqual(m["confidence"], 0.40)
+
+    def test_kotak_bank_statement_parsing_with_metadata_and_utr(self):
+        """Tests that Kotak statements with metadata rows and Dr/Cr columns parse accurately."""
+        kotak_sample = """Account Number: 9876543210
+Customer Name: SOLOEARN OPERATIONS
+Product: Kotak Safalta Current Account
+Statement Period: 01-Nov-2026 to 10-Nov-2026
+
+Sl No,Transaction Date,Description / Narration,Chq / Ref No.,Amount,Dr / Cr,Balance
+1,05-Nov-2026,UPI/432199887766/CR/CLIENT_A/KOTAK/INV-2026-0001,,5000.00,CR,25000.00
+2,07-Nov-2026,ATM WDL/432199000000/CASH,,2000.00,DR,23000.00
+"""
+        res = import_bank_statement_csv(kotak_sample, "kotak_sample.csv")
+        self.assertEqual(res["rows_imported"], 2)
+        with connect() as conn:
+            rows = conn.execute("SELECT * FROM bank_statement_rows WHERE import_id=?", (res["import_id"],)).fetchall()
+        self.assertEqual(len(rows), 2)
+        cr_row = [r for r in rows if r["tx_type"] == "credit"][0]
+        dr_row = [r for r in rows if r["tx_type"] == "debit"][0]
+        self.assertEqual(cr_row["amount_inr"], 5000.0)
+        self.assertEqual(cr_row["bank_ref"], "432199887766")
+        self.assertEqual(dr_row["amount_inr"], 2000.0)
+        self.assertEqual(dr_row["tx_type"], "debit")
+
+    def test_m7_local_preflight_verification_suite(self):
+        """Tests the end-to-end local preflight sandbox verification flow."""
+        preflight_res = run_m7_local_preflight(verbose=False)
+        self.assertTrue(preflight_res["success"])
+        self.assertEqual(preflight_res["steps_completed"], 7)
+        self.assertEqual(preflight_res["total_steps"], 7)
+
+    def test_kotak_onboarding_guide_specs(self):
+        """Verifies Kotak Safalta specs, Udyam NIC codes, and branch inquiry questions."""
+        guide = get_kotak_onboarding_guide()
+        self.assertEqual(guide["recommended_account"], "Kotak Safalta Current Account")
+        self.assertEqual(guide["average_quarterly_balance_inr"], 5000.0)
+        self.assertIn("udyamregistration.gov.in", guide["udyam_portal_url"])
+        self.assertEqual(len(guide["four_questions_for_kotak_branch"]), 4)
+        nic_codes = [n["code"] for n in guide["recommended_nic_codes"]]
+        self.assertIn("62011", nic_codes)
+        self.assertIn("62020", nic_codes)
+        self.assertIn("63112", nic_codes)
 
 
 if __name__ == "__main__":

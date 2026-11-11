@@ -458,7 +458,21 @@ def import_bank_statement_csv(file_content: str | bytes, filename: str, notes: s
     if not rows:
         raise ValueError("Bank statement file is empty")
 
-    header = [h.strip().lower().replace(" ", "_") for h in rows[0]]
+    # Locate header row dynamically (skips leading account metadata lines e.g. Kotak/HDFC statement exports)
+    header_row_idx = 0
+    header = []
+    for r_idx, r_candidate in enumerate(rows):
+        cand = [h.strip().lower().replace(" ", "_") for h in r_candidate]
+        has_date = any("date" in c for c in cand)
+        has_desc = any(any(k in c for k in ("description", "narration", "particulars", "remarks", "details")) for c in cand)
+        has_amt = any(any(k in c for k in ("amount", "credit", "deposit", "withdrawal", "debit", "balance")) for c in cand)
+        if (has_date and has_desc) or (has_date and has_amt) or (has_desc and has_amt):
+            header_row_idx = r_idx
+            header = cand
+            break
+
+    if not header:
+        header = [h.strip().lower().replace(" ", "_") for h in rows[0]]
 
     # Detect date column
     date_idx = -1
@@ -482,6 +496,7 @@ def import_bank_statement_csv(file_content: str | bytes, filename: str, notes: s
     credit_idx = -1
     debit_idx = -1
     amount_idx = -1
+    type_idx = -1
     for idx, col in enumerate(header):
         if "credit" in col or "deposit" in col:
             credit_idx = idx
@@ -489,6 +504,8 @@ def import_bank_statement_csv(file_content: str | bytes, filename: str, notes: s
             debit_idx = idx
         elif "amount" in col:
             amount_idx = idx
+        elif ("dr" in col and "cr" in col) or any(k in col for k in ("type", "txn_type", "transaction_type")):
+            type_idx = idx
 
     # Detect reference / UTR column
     ref_idx = -1
@@ -498,13 +515,23 @@ def import_bank_statement_csv(file_content: str | bytes, filename: str, notes: s
             break
 
     parsed_rows: list[dict[str, Any]] = []
-    for r in rows[1:]:
+    for r in rows[header_row_idx + 1:]:
         if not r or all(c.strip() == "" for c in r):
             continue
 
         raw_date = r[date_idx].strip() if len(r) > date_idx else utc_now()[:10]
         raw_desc = r[desc_idx].strip() if len(r) > desc_idx else "Bank entry"
         raw_ref = r[ref_idx].strip() if ref_idx != -1 and len(r) > ref_idx else ""
+
+        # Extract 12-digit UPI RRN / UTR from narration if raw_ref column is absent or empty
+        if not raw_ref:
+            upi_match = re.search(r"UPI[/_-]([A-Za-z0-9]{10,16})", raw_desc, re.IGNORECASE)
+            if upi_match:
+                raw_ref = upi_match.group(1)
+            else:
+                rrn_match = re.search(r"\b(\d{12})\b", raw_desc)
+                if rrn_match:
+                    raw_ref = rrn_match.group(1)
 
         # Extract amount & type
         tx_type = "credit"
@@ -520,10 +547,18 @@ def import_bank_statement_csv(file_content: str | bytes, filename: str, notes: s
             tx_type = "debit"
         elif amount_idx != -1 and len(r) > amount_idx:
             raw_val = r[amount_idx].strip()
-            if "-" in raw_val or "dr" in raw_val.lower():
-                tx_type = "debit"
             clean_str = re.sub(r"[^\d.]", "", raw_val)
             amt = float(clean_str) if clean_str else 0.0
+            if type_idx != -1 and len(r) > type_idx:
+                raw_type = r[type_idx].strip().lower()
+                if any(d in raw_type for d in ("dr", "debit", "withdrawal")):
+                    tx_type = "debit"
+                else:
+                    tx_type = "credit"
+            elif "-" in raw_val or "dr" in raw_val.lower():
+                tx_type = "debit"
+            else:
+                tx_type = "credit"
 
         if amt > 0:
             parsed_rows.append(

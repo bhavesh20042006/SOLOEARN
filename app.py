@@ -42,6 +42,10 @@ from core.upi_engine import (
     save_upi_settings,
     scan_and_match_statement_for_upi,
 )
+from core.preflight import (
+    get_kotak_onboarding_guide,
+    run_m7_local_preflight,
+)
 from core.db import (
     VALID_OPPORTUNITY_TRANSITIONS,
     add_discovery_source,
@@ -1510,6 +1514,45 @@ with tabs[6]:
             "**Key Financial Principle:** SOLOEARN never marks an invoice paid on customer screenshots, UTR messages, or QR scans alone. "
             "It only marks payment verified when confirmed against the receiving bank account's statement."
         )
+
+    # Preflight Verification & Kotak Onboarding Assistant
+    pref_col1, pref_col2 = st.columns(2)
+    with pref_col1:
+        with st.expander("🧪 Run M7.0.1 Local Preflight Test (Sandbox Verification)"):
+            st.markdown(
+                "Verify the complete Stage A payment collection lifecycle in an isolated sandbox before issuing real customer invoices: "
+                "invoice creation, Mode 01 QR, Mode 04 Intent, Kotak statement parsing, duplicate protection, and ledger reconciliation."
+            )
+            if st.button("▶️ Execute Local Preflight Test", key="run_local_preflight_btn", type="primary"):
+                with st.spinner("Running 7-step local preflight verification..."):
+                    pref_res = run_m7_local_preflight()
+                    if pref_res["success"]:
+                        st.success(f"✅ Preflight Succeeded: {pref_res['steps_completed']}/{pref_res['total_steps']} steps verified!")
+                    else:
+                        st.error(f"❌ Preflight Incomplete: {pref_res['steps_completed']}/{pref_res['total_steps']} steps passed.")
+                    for step_item in pref_res["results"]:
+                        icon = "✅" if step_item["status"] == "PASSED" else "❌"
+                        st.markdown(f"**Step {step_item['step']}: {icon} {step_item['name']}**")
+                        st.caption(step_item["details"])
+
+    with pref_col2:
+        with st.expander("🏛️ Kotak Mahindra Bank Pilot Setup & Udyam Guide"):
+            kotak_info = get_kotak_onboarding_guide()
+            st.markdown(
+                f"**Recommended Account:** `{kotak_info['recommended_account']}`\n\n"
+                f"• **AQB Requirement:** ₹{kotak_info['average_quarterly_balance_inr']:,.2f} average quarterly balance.\n"
+                f"• **Shortfall Fees:** ₹500/quarter if balance is ₹2.5k–₹5k; ₹1,000/quarter if below ₹2.5k.\n"
+                f"• **Merchant App:** `{kotak_info['kotak_biz_specs']['app_name']}` ({kotak_info['kotak_biz_specs']['installation_charges']}).\n"
+                f"• **Free Udyam Registration:** [{kotak_info['udyam_portal_url']}]({kotak_info['udyam_portal_url']})\n\n"
+                "**Exact NIC Codes for Udyam:**\n"
+                "- `62011`: Writing / automation scripts & computer programs\n"
+                "- `62020`: Data analytics consulting & business intelligence\n"
+                "- `63112`: Data processing, ETL & Excel data cleansing\n\n"
+                "**4 Questions to Ask Kotak Branch:**\n"
+                + "\n".join(f"- {q}" for q in kotak_info["four_questions_for_kotak_branch"])
+            )
+
+    st.divider()
 
     # Section 1: Dynamic UPI QR Invoice Generator & Viewer
     st.markdown("### 📱 Dynamic UPI QR Generator & Payment Intent")

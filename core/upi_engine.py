@@ -522,7 +522,8 @@ def scan_and_match_statement_for_upi(
         # Check 1: Invoice number in narration or bank_ref
         for inv in pending_invoices:
             inv_num = str(inv["invoice_number"]).upper()
-            if inv_num in desc or inv_num in bank_ref:
+            inv_num_clean = inv_num.replace("-", "")
+            if inv_num in desc or inv_num in bank_ref or inv_num_clean in desc or inv_num_clean in bank_ref:
                 matched_inv = inv
                 match_type = "invoice_number_in_narration"
                 confidence = 1.0
