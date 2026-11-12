@@ -217,13 +217,14 @@ class TestFridayAgentCore(unittest.TestCase):
             portal.validate_and_ingest_file(token, "empty.csv", b"")
         self.assertIn("empty", str(ctx.exception))
 
-        # C. CSV Formula Injection Sanitized
+        # C. CSV Formula Injection Sanitized without corrupting negative numbers
         raw_csv_with_injection = (
             b"id,customer,price\n"
             b"1,=cmd|' /C calc'!A0,100\n"
             b"2,+10*20,200\n"
             b"3,@SUM(1,2),300\n"
             b"4,-50+10,400\n"
+            b"5,Refund,-1500.00\n"
         )
         res = portal.validate_and_ingest_file(token, "sales_data.csv", raw_csv_with_injection)
         self.assertEqual(res["status"], "ingested")
@@ -234,6 +235,9 @@ class TestFridayAgentCore(unittest.TestCase):
         self.assertNotIn("\n1,=cmd", stored_content)
         self.assertIn("1,'=cmd", stored_content)
         self.assertIn("2,'+10*20", stored_content)
+        # Verify legitimate negative numbers are preserved and NOT converted to text
+        self.assertIn("5,Refund,-1500.00", stored_content)
+        self.assertNotIn("'-1500.00", stored_content)
 
     # -----------------------------------------------------------------------
     # Proof 6: HMAC-SHA256 Payment Webhook & Idempotency

@@ -1,8 +1,89 @@
-# SOLOEARN v0.6.1.2 — Net-Profit-First Private Workbench
+# SOLOEARN — Autonomous B2B Operations & FRIDAY Agent Core
 
-A local-first, single-owner prototype for organizing legitimate paid-work opportunities and producing a first repeatable deliverable: a CSV business-analysis pack.
+A local-first, profit-optimized private operations engine for B2B analytics and business process automation. SOLOEARN couples deterministic service delivery workflows with **FRIDAY**—an autonomous AI agent core governed by a strict, fail-closed permission nervous system.
 
-**Important:** this is not AGI and it does not guarantee income. It is not an unattended earning bot. This release does not scrape job sites, send proposals, accept contracts, submit deliverables, make purchases, move money, log in to a bank, or access personal files. Human approval is required for external actions.
+> **Commercial Reality Notice:** All software engineering benchmarks and architectural capability proofs in this repository have passed automated testing (224 passed, 2 skipped across 226 discovered tests; 7/7 local preflight checks). However, software tests do **not** constitute realized business income. The live commercial ledger remains at `paying_customers: 0, revenue: ₹0.00, customer_advances: ₹0.00`. Realizing revenue requires completing the 9 real-world onboarding steps (Kotak Safalta Current Account, Kotak.biz merchant activation, and live client acquisition).
+
+---
+
+## Architecture: The Tripartite Model
+
+```
++-------------------------------------------------------------------------+
+|                           THE FRIDAY BRAIN                              |
+|   Goal Reasoning • ReAct Planning • Episodic CRM Memory • Context Tracking |
++-------------------------------------------------------------------------+
+                                     |
+                                     v
++-------------------------------------------------------------------------+
+|                      THE NERVOUS SYSTEM (CONTROLLER)                    |
+|    5 Human Approval Gates • Margin Floor (>=50%) • Turnaround SLA (>=24h) |
+|         OWASP File Intake Sanitization • Durable Action Audit Logs       |
++-------------------------------------------------------------------------+
+                                     |
+                                     v
++-------------------------------------------------------------------------+
+|                           THE SOLOEARN BODY                             |
+|  Discovery • Sales Engine • Delivery Workspaces • QA Agent • UPI Ledger |
++-------------------------------------------------------------------------+
+```
+
+1. **The Brain (`core/friday_agent.py`)**:
+   - `FridayBrain` handles multi-step goal reasoning (`drive_revenue`, `qualify_leads`, `deliver_order`), ReAct loop tool selection, and context progression.
+   - `FridayMemory` isolates per-client episodic records, requirements, and communication history in SQLite without cross-tenant information leakage.
+2. **The Nervous System (`core/friday_agent.py` & `core/friday_secure_portal.py`)**:
+   - `FridayPermissionController` intercepts all tool calls. Enforces 5 Non-Bypassable Human Approval Gates, 50% contribution margin floors, and standard 24h turnaround SLAs.
+   - `FridaySecurePortal` implements OWASP-compliant tokenized file ingestion (50MB limits, UUID file isolation, and formula injection sanitization preserving negative numeric values).
+   - `FridayPaymentWebhookHandler` enforces HMAC-SHA256 signature verification and replay/idempotency protection before releasing deliverables.
+3. **The Body (`core/autonomy_profitability_system.py` & `core/upi_engine.py`)**:
+   - Discovery, sales, delivery workspaces, quality verification (up to 3 automated repair attempts), and statutory Mode 01/04 UPI invoicing.
+
+---
+
+## The 5 Human Approval Gates
+
+| Gate | Description | Escalation Trigger |
+| :--- | :--- | :--- |
+| **Gate 1** | **Unusual Contract / Discounting** | Proposed fee discounted $>20\%$ below standard tier price, or contribution margin $<50\%$. |
+| **Gate 2** | **Rush Turnaround Commitment** | Turnaround requested under standard 24h SLA; requires owner capacity verification. |
+| **Gate 3** | **Deliverable Release** | Strictly locked until invoice status is verified as `paid` via cleared bank credit or valid webhook. |
+| **Gate 4** | **Outbound Outreach Dispatch** | Cold outreach message or email requires owner click-to-dispatch confirmation. |
+| **Gate 5** | **Unverified Execution Safeguard** | Blocks scraping protected sites, CAPTCHA bypassing, or sending customer data to public AI APIs. |
+
+---
+
+## Supported Service Workflows
+
+1. **Tier 1: CSV Analytics & Reporting Bundle** (₹5,000 standard base)
+   - Multi-tab Excel workbook, statistical summary, interactive charts, and executive HTML report.
+2. **Tier 2: Data Engineering & Transformation Pipeline** (₹15,000 standard base)
+   - Schema mapping, automated cleaning, typed output datasets, and standalone transformation scripts.
+3. **Tier 3: Interactive Web Dashboard Pack** (₹20,000 standard base)
+   - Offline-ready responsive HTML dashboard with KPI metric cards, searchable tables, and data visualizers.
+4. **Tier 4: Business Process Automation Pack** (₹15,000 standard base)
+   - Reusable pipeline scripts, cross-file reconciliation, duplicate removal, and audit reporting.
+
+---
+
+## Verification & Integrity
+
+### Test Suite Execution
+```bash
+# Run FRIDAY Agent Core 8-proof suite
+python -m unittest tests.test_friday_agent_core
+
+# Run complete regression discovery suite (226 tests)
+python -m unittest discover -s tests
+
+# Run Stage A Local Preflight verification (7 steps)
+python scripts/run_m7_local_preflight.py
+```
+
+### Archive Checksum
+- Archive: `SOLOEARN_Friday_Agent_Core_Ready.zip` (328,757 bytes)
+- Base64 ASCII: `SOLOEARN_Friday_Agent_Core_Ready.zip.b64.txt` (438,344 chars)
+- **SHA256**: `E2CA5E1F99BEB32860CDB7B1AF8E683F1386E24B589F358A98A62053F913CDE0`
+
 
 ## What works in v0.6.1.2
 

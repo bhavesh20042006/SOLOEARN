@@ -49,7 +49,7 @@ def get_files_to_pack():
             # Skip symlinks
             if f_path.is_symlink():
                 continue
-            if f in {".env"} or f_path.suffix in exclude_extensions or f.endswith(".zip"):
+            if f in {".env"} or f_path.suffix in exclude_extensions or f.endswith(".zip") or f.endswith(".b64.txt"):
                 continue
             rel = f_path.relative_to(root)
             files.append((f_path, rel.as_posix()))
