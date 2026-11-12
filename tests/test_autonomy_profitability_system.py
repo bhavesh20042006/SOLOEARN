@@ -420,6 +420,11 @@ class TestAutonomyProfitabilitySystem(unittest.TestCase):
         self.assertTrue(balanced["meets_lakh_profit_target"])
         self.assertTrue(model.is_capacity_viable)
 
+        # Verify 50% contribution margin floor benchmark
+        floor_model = model.floor_margin_model
+        self.assertEqual(floor_model["contribution_margin_floor_pct"], 50.0)
+        self.assertAlmostEqual(floor_model["required_monthly_sales_at_floor_inr"], 212322.28, delta=1.0)
+
     # -----------------------------------------------------------------------
     # Test 7: Autonomy Controller Routine Execution and Escalation Queue
     # -----------------------------------------------------------------------
@@ -459,10 +464,19 @@ class TestAutonomyProfitabilitySystem(unittest.TestCase):
             is_sandbox=True,
         )
 
-        # Run operating cycle
-        report = controller.run_operating_cycle()
-        self.assertGreater(report.routine_tasks_completed, 0)
-        self.assertGreaterEqual(len(report.escalations), 1)
+        # Run cycle 1: drafts proposal for Apex Retailers
+        report1 = controller.run_operating_cycle()
+        self.assertGreater(report1.routine_tasks_completed, 0)
+        self.assertEqual(report1.proposals_drafted, 1)
+        self.assertGreaterEqual(len(report1.escalations), 1)
+
+        # Run cycle 2: should NOT duplicate proposal for Apex Retailers (idempotent cycle)
+        report2 = controller.run_operating_cycle()
+        self.assertEqual(report2.proposals_drafted, 0)
+
+        # Run cycle 3: continues running cleanly without getting stuck or duplicating work
+        report3 = controller.run_operating_cycle()
+        self.assertEqual(report3.proposals_drafted, 0)
 
 
 if __name__ == "__main__":

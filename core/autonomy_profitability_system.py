@@ -199,6 +199,7 @@ class ProfitabilityCapacityModel:
     tier_capacities: dict[str, dict[str, Any]]
     balanced_portfolio_model: dict[str, Any]
     is_capacity_viable: bool
+    floor_margin_model: dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -987,6 +988,19 @@ class AutonomyController:
 
         is_viable = all(t["is_capacity_viable"] for t in tier_caps.values()) and balanced_model["meets_lakh_profit_target"]
 
+        floor_sales_req = round(pretax_req / MINIMUM_ACCEPTABLE_CONTRIBUTION_MARGIN, 2)
+        floor_margin_model = {
+            "contribution_margin_floor_pct": MINIMUM_ACCEPTABLE_CONTRIBUTION_MARGIN * 100.0,
+            "required_monthly_sales_at_floor_inr": floor_sales_req,
+            "pretax_contribution_generated_inr": pretax_req,
+            "explanation": (
+                f"At the strict 50% contribution margin floor, generating ₹{pretax_req:,.2f} "
+                f"pre-tax contribution requires ₹{floor_sales_req:,.2f} in gross billings. "
+                f"In contrast, SOLOEARN's pure software delivery portfolio operates at ~92% blended margin, "
+                f"requiring ₹{blended_revenue:,.2f} in monthly gross billings."
+            ),
+        }
+
         return ProfitabilityCapacityModel(
             monthly_target_inr=monthly_target,
             required_pretax_profit_inr=pretax_req,
@@ -995,6 +1009,7 @@ class AutonomyController:
             tier_capacities=tier_caps,
             balanced_portfolio_model=balanced_model,
             is_capacity_viable=is_viable,
+            floor_margin_model=floor_margin_model,
         )
 
     def run_operating_cycle(self) -> OperatingCycleReport:
@@ -1017,12 +1032,20 @@ class AutonomyController:
         scored_prospects = OpportunityEngine.find_and_score_prospects(is_sandbox=self.is_sandbox)
         routine_count += len(scored_prospects)
 
-        # Step 3: Sales qualification for fit prospects
+        # Step 3: Sales qualification for fit prospects (idempotent; no duplicate proposals)
         proposals_drafted = 0
         for p in scored_prospects:
             if p.is_fit and p.fit_score >= 50.0:
+                with connect() as conn:
+                    existing_prop = conn.execute(
+                        "SELECT id FROM proposals WHERE draft_text LIKE ?",
+                        (f"%COMMERCIAL PROPOSAL FOR {p.company_name.upper()}%",),
+                    ).fetchone()
+                if existing_prop:
+                    continue
+
                 prop, req_approval, reason = SalesEngine.prepare_proposal(
-                    lead_id=int(p.prospect_id) if str(p.prospect_id).isdigit() else None,
+                    lead_id=None,
                     client_name=p.company_name,
                     service_tier=p.service_tier,
                     price_inr=p.target_price_inr,
