@@ -693,11 +693,13 @@ def reconcile_upi_payment_from_bank_credit(
         revenue_portion = round(credit_amt * subtotal_ratio, 2)
         tax_portion = round(credit_amt * tax_ratio, 2)
 
+        is_sb = 1 if inv.get("is_sandbox") else 0
+
         conn.execute(
             """INSERT INTO financial_transactions (
                 tx_date, tx_type, amount_inr, amount_paise, currency,
-                reference_id, description, is_reversal, created_at
-            ) VALUES (?, 'client_receipt', ?, ?, 'INR', ?, ?, 0, ?)""",
+                reference_id, description, is_reversal, is_sandbox, created_at
+            ) VALUES (?, 'client_receipt', ?, ?, 'INR', ?, ?, 0, ?, ?)""",
             (
                 str(st_row["tx_date"])[:10],
                 revenue_portion,
@@ -705,6 +707,7 @@ def reconcile_upi_payment_from_bank_credit(
                 invoice_number,
                 f"UPI client receipt for {invoice_number} ({inv['client_name']}) - Ref: {ref_for_row}"
                 + (" (Partial)" if not is_full_settlement else ""),
+                is_sb,
                 now,
             ),
         )
@@ -713,14 +716,15 @@ def reconcile_upi_payment_from_bank_credit(
             conn.execute(
                 """INSERT INTO financial_transactions (
                     tx_date, tx_type, amount_inr, amount_paise, currency,
-                    reference_id, description, is_reversal, created_at
-                ) VALUES (?, 'gst_collected', ?, ?, 'INR', ?, ?, 0, ?)""",
+                    reference_id, description, is_reversal, is_sandbox, created_at
+                ) VALUES (?, 'gst_collected', ?, ?, 'INR', ?, ?, 0, ?, ?)""",
                 (
                     str(st_row["tx_date"])[:10],
                     tax_portion,
                     inr_to_paise(tax_portion),
                     invoice_number,
                     f"GST collected on UPI payment for {invoice_number}",
+                    is_sb,
                     now,
                 ),
             )

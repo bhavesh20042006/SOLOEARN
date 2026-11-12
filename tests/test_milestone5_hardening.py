@@ -48,6 +48,21 @@ class Milestone5HardeningTests(unittest.TestCase):
             conn.execute("DELETE FROM opportunities")
             conn.execute("DELETE FROM discovery_sources")
             conn.execute("DELETE FROM audit_log")
+            conn.execute("DELETE FROM financial_transactions WHERE reference_id LIKE 'INV-%'")
+
+    @classmethod
+    def tearDownClass(cls):
+        with connect() as conn:
+            conn.execute("DELETE FROM revisions")
+            conn.execute("DELETE FROM invoices")
+            conn.execute("DELETE FROM proposals")
+            conn.execute("DELETE FROM revenue")
+            conn.execute("DELETE FROM execution_claims")
+            conn.execute("DELETE FROM tasks")
+            conn.execute("DELETE FROM opportunities")
+            conn.execute("DELETE FROM discovery_sources")
+            conn.execute("DELETE FROM audit_log")
+            conn.execute("DELETE FROM financial_transactions WHERE reference_id LIKE 'INV-%'")
 
     def _submitted_opportunity_with_task(self, title: str) -> tuple[int, int]:
         opportunity_id = add_opportunity(

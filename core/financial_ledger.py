@@ -125,6 +125,29 @@ def record_ledger_transaction(
     return tx_id
 
 
+def record_owner_draw(
+    amount_inr: float,
+    description: str = "Owner personal withdrawal",
+    reference_id: str = "",
+    tx_date: str = "",
+    is_sandbox: bool = False,
+) -> int:
+    """
+    Records an owner capital withdrawal.
+    CRITICAL: Under Indian tax law, proprietor draws are NOT deductible business expenses.
+    They reduce available bank cash and distributable cash, but do NOT reduce operating profit
+    or taxable business profit.
+    """
+    return record_ledger_transaction(
+        tx_type="owner_draw",
+        amount_inr=amount_inr,
+        description=description,
+        reference_id=reference_id,
+        tx_date=tx_date,
+        is_sandbox=is_sandbox,
+    )
+
+
 def record_invoice_refund(
     invoice_number: str,
     gross_refund_inr: float,
@@ -826,6 +849,10 @@ def reconcile_statement_row(
         exp = None
         bank_ref = str(st_row["bank_ref"] or "").strip()[:120]
 
+        desc = str(st_row["description"] or "").upper()
+        if "REVERSAL" in desc and entity_type in {"invoice", "customer_advance"}:
+            raise ValueError("Bank statement row is a reversal transaction and cannot be settled as revenue or customer advance")
+
         # Validate the matched entity before marking the statement row reconciled.
         if entity_type == "invoice":
             if tx_direction != "credit":
@@ -1208,11 +1235,16 @@ def get_cash_and_reserves_summary(
             tds_credits_ledger = tx_sums.get("tds_credit", 0.0)
             bank_cash_receipts = max(0.0, round(all_collected_receipts - tds_credits_ledger, 2))
             unapplied_advance = max(0.0, customer_advance_in - customer_advance_applied)
-            total_cash_in = bank_cash_receipts + unapplied_advance + gst_collected + other_cash_in
-            total_cash_out = paid_expenses + refunds_paid + owner_draws + tax_payments + platform_fees + gst_paid + other_cash_out
+            total_cash_in = round(bank_cash_receipts + unapplied_advance + gst_collected + other_cash_in, 2)
+            total_cash_out = round(paid_expenses + refunds_paid + owner_draws + tax_payments + platform_fees + gst_paid + other_cash_out, 2)
             bank_balance = round(opening_balance + total_cash_in - total_cash_out, 2)
         else:
             bank_balance = None
+            tds_credits_ledger = tx_sums.get("tds_credit", 0.0)
+            bank_cash_receipts = None
+            unapplied_advance = None
+            total_cash_in = None
+            total_cash_out = None
 
         # Statutory GST reserve: GST collected - GST paid (net liability)
         gst_liability_reserve = max(0.0, round(gst_collected - gst_paid - gst_refunds, 2))
@@ -1250,7 +1282,12 @@ def get_cash_and_reserves_summary(
         "bank_balance_known": bank_balance_known,
         "bank_balance_inr": bank_balance,
         "customer_advance_liability_inr": customer_advance_liability,
+        "unapplied_advance_inr": unapplied_advance,
         "collected_receipts_inr": round(collected_receipts, 2),
+        "bank_cash_receipts_inr": bank_cash_receipts,
+        "tds_receivable_inr": round(tds_credits_ledger, 2),
+        "total_cash_in_inr": total_cash_in,
+        "total_cash_out_inr": total_cash_out,
         "total_operating_expenses_inr": round(total_operating_expenses, 2),
         "deductible_operating_expenses_inr": round(deductible_operating_expenses, 2),
         "operating_profit_inr": round(operating_profit, 2),

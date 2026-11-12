@@ -1062,6 +1062,8 @@ def get_commercial_validation_dashboard(include_sandbox: bool = False) -> dict[s
             "tax_provisions_inr": tax_provisions_inr,
             "actual_post_tax_owner_profit_inr": actual_post_tax_owner_profit_inr,
             "customer_advance_liability_inr": customer_advance_liability_inr,
+            "tds_receivable_inr": cash_info.get("tds_receivable_inr", 0.0),
+            "bank_balance_inr": cash_info.get("bank_balance_inr", 0.0),
         },
         "scorecard": scorecard,
         "approval_gates": approval_gates,
