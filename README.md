@@ -2,7 +2,7 @@
 
 A local-first, profit-optimized private operations engine for B2B analytics and business process automation. SOLOEARN couples deterministic service delivery workflows with **FRIDAY**—an autonomous AI agent core governed by a strict, fail-closed permission nervous system.
 
-> **Commercial Reality Notice:** All software engineering benchmarks and architectural capability proofs in this repository have passed automated testing (225 passed, 2 skipped across 227 discovered tests; 7/7 local preflight checks). However, software tests do **not** constitute realized business income. The live commercial ledger remains at `paying_customers: 0, revenue: ₹0.00, customer_advances: ₹0.00`. Realizing revenue requires completing the 9 real-world onboarding steps (Kotak Safalta Current Account, Kotak.biz merchant activation, and live client acquisition).
+> **Commercial Reality Notice:** All software engineering benchmarks and architectural capability proofs in this repository have passed automated testing (241 passed, 2 skipped across 243 discovered tests; 25/25 in FRIDAY Agent Core test suite; 7/7 local preflight checks). However, software tests do **not** constitute realized business income. The live commercial ledger remains at `paying_customers: 0, revenue: ₹0.00, customer_advances: ₹0.00`. Realizing revenue requires completing the 9 real-world onboarding steps (Kotak Safalta Current Account, Kotak.biz merchant activation, and live client acquisition).
 
 ---
 
@@ -69,33 +69,30 @@ A local-first, profit-optimized private operations engine for B2B analytics and 
 
 ### Test Suite Execution
 ```bash
-# Run FRIDAY Agent Core 9-proof suite (17 audit dimensions)
+# Run FRIDAY Agent Core 25-test security & integrity regression suite
 python -m unittest tests.test_friday_agent_core
 
-# Run complete regression discovery suite (227 tests: 225 passed, 2 skipped, 0 failures)
+# Run complete regression discovery suite (243 tests: 241 passed, 2 skipped, 0 failures)
 python -m unittest discover -s tests
 
 # Run Stage A Local Preflight verification (7/7 steps passed)
 python scripts/run_m7_local_preflight.py
 ```
 
-### Archive Checksum (M8.0.2 Corrective Release)
-- Archive: `SOLOEARN_Friday_Agent_Core_Ready.zip` (344,063 bytes)
-- Base64 ASCII: `SOLOEARN_Friday_Agent_Core_Ready.zip.b64.txt` (458,752 chars)
-- **SHA256**: `DB047ECDB854317F146F91142ED3DF229B6F159D2D4B9F130C51A2D8B86A267D`
+### Archive Checksum (M8.0.3 Production Integrity Release)
+- Archive: `SOLOEARN_Friday_Agent_Core_Ready.zip` (336,785 bytes)
+- Base64 ASCII: `SOLOEARN_Friday_Agent_Core_Ready.zip.b64.txt` (449,048 chars)
+- **SHA256**: `ABAD4DD2EE6CDB6741CBEA53E12DB774D2D17DBC87D56FFCC47F2B8F87EF8E78`
 
-### M8.0.2 Corrective Audit Fixes
-Following an independent static code audit of FRIDAY F1–F7 on GitHub, the following 10 real defects were identified and resolved:
-1. **Real AI LLM Reasoning Connection**: Connected `OllamaClient.chat()` directly to `FridayBrain.plan_next_step()`, passing dynamic JSON tool catalogues, enforcing prompt injection/hallucination defenses, and maintaining deterministic fallback.
-2. **Fake Customer Data Fallback Removed**: Eradicated the 3-row sample dataset fallback in `_tool_execute_workflow()`. Workflows fail closed if client dataset is missing.
-3. **Formal Customer Order Acceptance Gating**: Stopped jumping automatically from commercial proposal to execution; registered tool `register_customer_order_acceptance` requiring customer PO/ref and verified dataset upload before job execution.
-4. **Payment Webhook Security & Idempotency**: Banned default secrets in production (`is_sandbox=False` strictly requires $\ge 32$-character custom secret); enforced exact invoice total matching; prevented duplicate bank UTR replay; implemented idempotent event shielding.
-5. **Client Upload Token Expiry & CSV Sanitization**: Fixed token expiration calculation using `timedelta(hours=validity_hours)`; enforced single-use; replaced naive `.split(",")` with `csv.reader`/`csv.writer` preserving quoted fields with embedded commas and legitimate negative numbers.
-6. **Cross-Environment SQLite Isolation**: Added `is_sandbox` to compound unique constraints in `friday_memories` and `friday_client_sessions`.
-7. **Tool Registry Parameter Schema Validation**: Added strict type and required-field validation against JSON parameter schemas in `FridayToolRegistry.execute_tool()`.
-8. **Persistent Owner Escalation**: Implemented `friday_escalations` table and approval resume workflow; gated actions proceed upon owner authorization.
-9. **Delivery Release Manifest**: Deliverable release verifies cleared payment, generates signed download tokens (`dlv_...`), and computes SHA256 checksums.
-10. **Database Append-Only Immutability**: Added SQLite triggers on `friday_action_logs` and `financial_transactions` physically blocking `UPDATE` and `DELETE` on production records (`is_sandbox = 0`).
+### M8.0.3 Production Integrity Corrections
+Following independent static code auditing and regression testing of FRIDAY M8.0.2 on GitHub, 7 key integrity defect areas were resolved and verified across 16 mandatory regression tests (Tests 10–25 in `tests.test_friday_agent_core`):
+1. **Approval Security & Single-Use Consumption**: Gated owner escalations now hash canonical arguments with SHA-256 (`args_hash`), enforce a strict 24-hour expiration window, and atomically mark records as consumed (`is_consumed = 1`) upon tool execution, permanently preventing parameter tampering or double consumption.
+2. **Customer Acceptance Precondition**: Tool `execute_data_workflow` is bound directly to `friday_accepted_orders`, verifying proposal client ownership, environment scoping, and exact dataset SHA-256 match before any delivery processing begins.
+3. **Webhook Security & UTR Deduplication**: Bank webhook processing strictly enforces non-empty bank UTRs (never generating synthetic timestamp references), rejects underpayments, overpayments, NaNs, and infinities, validates successful status (`captured`/`succeeded`), scopes queries strictly to `is_sandbox`, and blocks duplicate UTR reuse across events via database-level `friday_settled_utrs` unique constraints under `BEGIN IMMEDIATE` transactions.
+4. **Concurrent Token & Ingestion Protection**: Serialized atomic token claims in SQLite (`BEGIN IMMEDIATE`) prevent concurrent race conditions on single-use upload tokens (`friday_portal_tokens`) and deliverable download tokens (`friday_deliverable_tokens`).
+5. **Delivery Containment & Single-Use Downloads**: Deliverable releases verify payment match against the exact task, check workspace directory containment against path traversal, and provide `download_client_deliverable()` with atomic single-use download validation and audit event logging.
+6. **Truthful Outreach Reporting**: Outreach dispatch never synthesizes fake message IDs; when no external delivery provider credentials exist in the environment, pitches are truthfully recorded as drafts (`drafted_no_provider_configured`).
+7. **Sequence Precondition Guards & Immutability**: All tools enforce workflow sequence preconditions, failing closed if called out-of-sequence by an LLM without crashing or corrupting state. Database append-only triggers prevent any update or deletion of production audit records.
 
 
 ## What works in v0.6.1.2

@@ -27,7 +27,7 @@ import re
 import time
 import uuid
 from dataclasses import asdict, dataclass, field
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable
 
@@ -146,12 +146,106 @@ def init_friday_tables() -> None:
                 cycle_id TEXT NOT NULL,
                 tool_name TEXT NOT NULL,
                 tool_args TEXT NOT NULL,
+                args_hash TEXT NOT NULL DEFAULT '',
                 reason TEXT NOT NULL,
-                status TEXT NOT NULL DEFAULT 'pending_owner', -- 'pending_owner', 'approved', 'rejected'
+                status TEXT NOT NULL DEFAULT 'pending_owner', -- 'pending_owner', 'approved', 'rejected', 'consumed'
                 owner_notes TEXT DEFAULT '',
+                expires_at TEXT NOT NULL DEFAULT '',
+                is_consumed INTEGER NOT NULL DEFAULT 0,
+                consumed_at TEXT,
                 is_sandbox INTEGER NOT NULL DEFAULT 0,
                 created_at TEXT NOT NULL,
                 resolved_at TEXT
+            );
+            """
+        )
+        # Ensure migration columns for friday_escalations
+        cols = [r["name"] for r in conn.execute("PRAGMA table_info(friday_escalations)").fetchall()]
+        if "args_hash" not in cols:
+            conn.execute("ALTER TABLE friday_escalations ADD COLUMN args_hash TEXT DEFAULT ''")
+        if "expires_at" not in cols:
+            conn.execute("ALTER TABLE friday_escalations ADD COLUMN expires_at TEXT DEFAULT ''")
+        if "is_consumed" not in cols:
+            conn.execute("ALTER TABLE friday_escalations ADD COLUMN is_consumed INTEGER DEFAULT 0")
+        if "consumed_at" not in cols:
+            conn.execute("ALTER TABLE friday_escalations ADD COLUMN consumed_at TEXT")
+
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS friday_accepted_orders (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                client_name TEXT NOT NULL,
+                proposal_id INTEGER NOT NULL,
+                opportunity_id INTEGER,
+                service_tier TEXT NOT NULL,
+                agreed_price_inr REAL NOT NULL,
+                acceptance_ref TEXT NOT NULL,
+                dataset_sha256 TEXT NOT NULL,
+                dataset_bytes INTEGER NOT NULL,
+                status TEXT NOT NULL DEFAULT 'accepted', -- 'accepted', 'in_delivery', 'completed'
+                is_sandbox INTEGER NOT NULL DEFAULT 0,
+                accepted_at TEXT NOT NULL,
+                FOREIGN KEY(proposal_id) REFERENCES proposals(id)
+            );
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS friday_deliverable_tokens (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                token TEXT NOT NULL,
+                token_hash TEXT NOT NULL,
+                task_id INTEGER NOT NULL,
+                opportunity_id INTEGER,
+                invoice_number TEXT NOT NULL,
+                client_name TEXT NOT NULL,
+                artifact_path TEXT NOT NULL,
+                file_sha256 TEXT NOT NULL,
+                file_size_bytes INTEGER NOT NULL,
+                is_downloaded INTEGER NOT NULL DEFAULT 0,
+                download_count INTEGER NOT NULL DEFAULT 0,
+                max_downloads INTEGER NOT NULL DEFAULT 1,
+                expires_at TEXT NOT NULL,
+                downloaded_at TEXT,
+                created_at TEXT NOT NULL,
+                is_sandbox INTEGER NOT NULL DEFAULT 0,
+                UNIQUE(token, is_sandbox),
+                FOREIGN KEY(task_id) REFERENCES tasks(id)
+            );
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS friday_delivery_events (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                token TEXT NOT NULL,
+                task_id INTEGER NOT NULL,
+                client_name TEXT NOT NULL,
+                delivery_method TEXT NOT NULL,
+                status TEXT NOT NULL,
+                bytes_transferred INTEGER NOT NULL,
+                file_sha256 TEXT NOT NULL,
+                ip_or_recipient TEXT NOT NULL,
+                delivered_at TEXT NOT NULL,
+                is_sandbox INTEGER NOT NULL DEFAULT 0
+            );
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS friday_communication_logs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                client_name TEXT NOT NULL,
+                channel TEXT NOT NULL,
+                recipient TEXT NOT NULL,
+                subject TEXT DEFAULT '',
+                body_text TEXT NOT NULL,
+                provider TEXT NOT NULL,
+                provider_message_id TEXT DEFAULT '',
+                status TEXT NOT NULL,
+                error_message TEXT DEFAULT '',
+                is_sandbox INTEGER NOT NULL DEFAULT 0,
+                created_at TEXT NOT NULL
             );
             """
         )
@@ -218,37 +312,69 @@ class FridayPermissionController:
         self.is_sandbox = is_sandbox
         self.escalation_queue: list[dict[str, Any]] = []
 
-    def is_escalation_approved(self, tool_name: str, arguments: dict[str, Any]) -> bool:
-        """Checks if a matching escalation was explicitly approved by the human owner."""
-        client_name = str(arguments.get("client_name", ""))
-        with connect() as conn:
-            rows = conn.execute(
-                """
-                SELECT id, tool_args FROM friday_escalations 
-                WHERE tool_name = ? AND status = 'approved' AND is_sandbox = ?
-                ORDER BY id DESC
-                """,
-                (tool_name, int(self.is_sandbox)),
-            ).fetchall()
-            for r in rows:
-                try:
-                    args = json.loads(r["tool_args"])
-                    if args.get("client_name") == client_name:
-                        return True
-                except Exception:
-                    continue
-        return False
-
-    def record_escalation(self, tool_name: str, tool_args: dict[str, Any], reason: str, cycle_id: str = "") -> int:
+    def is_escalation_approved(self, tool_name: str, arguments: dict[str, Any], consume: bool = True) -> bool:
+        """
+        Checks if an exact, single-use, unexpired escalation matching tool_name and complete
+        canonical arguments hash was approved by the human owner.
+        """
+        current_hash = hashlib.sha256(json.dumps(arguments, sort_keys=True).encode("utf-8")).hexdigest()
         now = utc_now()
+        with connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            row = conn.execute(
+                """
+                SELECT id, expires_at, is_consumed FROM friday_escalations 
+                WHERE tool_name = ? AND args_hash = ? AND status = 'approved' 
+                  AND is_consumed = 0 AND is_sandbox = ?
+                ORDER BY id DESC LIMIT 1
+                """,
+                (tool_name, current_hash, int(self.is_sandbox)),
+            ).fetchone()
+            if not row:
+                conn.commit()
+                return False
+            if row["expires_at"] and row["expires_at"] <= now:
+                conn.commit()
+                return False
+
+            if consume:
+                conn.execute(
+                    "UPDATE friday_escalations SET is_consumed = 1, consumed_at = ?, status = 'consumed' WHERE id = ?",
+                    (now, row["id"]),
+                )
+            conn.commit()
+            return True
+
+    def record_escalation(
+        self,
+        tool_name: str,
+        tool_args: dict[str, Any],
+        reason: str,
+        cycle_id: str = "",
+        validity_hours: int = 24,
+    ) -> int:
+        now_dt = datetime.now(timezone.utc)
+        now = now_dt.isoformat()
+        expires = (now_dt + timedelta(hours=validity_hours)).isoformat()
+        args_hash = hashlib.sha256(json.dumps(tool_args, sort_keys=True).encode("utf-8")).hexdigest()
         with connect() as conn:
             cursor = conn.execute(
                 """
                 INSERT INTO friday_escalations (
-                    cycle_id, tool_name, tool_args, reason, status, is_sandbox, created_at
-                ) VALUES (?, ?, ?, ?, 'pending_owner', ?, ?)
+                    cycle_id, tool_name, tool_args, args_hash, reason, status,
+                    expires_at, is_consumed, is_sandbox, created_at
+                ) VALUES (?, ?, ?, ?, ?, 'pending_owner', ?, 0, ?, ?)
                 """,
-                (cycle_id or "ADHOC", tool_name, json.dumps(tool_args), reason, int(self.is_sandbox), now),
+                (
+                    cycle_id or "ADHOC",
+                    tool_name,
+                    json.dumps(tool_args),
+                    args_hash,
+                    reason,
+                    expires,
+                    int(self.is_sandbox),
+                    now,
+                ),
             )
             conn.commit()
             return cursor.lastrowid
@@ -256,9 +382,16 @@ class FridayPermissionController:
     def approve_escalation(self, escalation_id: int, owner_notes: str = "") -> dict[str, Any]:
         now = utc_now()
         with connect() as conn:
-            row = conn.execute("SELECT * FROM friday_escalations WHERE id = ?", (escalation_id,)).fetchone()
+            row = conn.execute(
+                "SELECT * FROM friday_escalations WHERE id = ? AND is_sandbox = ?",
+                (escalation_id, int(self.is_sandbox)),
+            ).fetchone()
             if not row:
-                raise ValueError(f"Escalation #{escalation_id} not found")
+                raise ValueError(f"Escalation #{escalation_id} not found in this environment")
+            if row["status"] == "consumed" or bool(row["is_consumed"]):
+                raise ValueError(f"Escalation #{escalation_id} has already been consumed")
+            if row["expires_at"] and row["expires_at"] <= now:
+                raise ValueError(f"Escalation #{escalation_id} expired at {row['expires_at']}")
             conn.execute(
                 "UPDATE friday_escalations SET status = 'approved', owner_notes = ?, resolved_at = ? WHERE id = ?",
                 (owner_notes or "Owner approved action", now, escalation_id),
@@ -268,15 +401,19 @@ class FridayPermissionController:
                 "escalation_id": escalation_id,
                 "status": "approved",
                 "tool_name": row["tool_name"],
+                "args_hash": row["args_hash"],
                 "tool_args": json.loads(row["tool_args"]),
             }
 
     def reject_escalation(self, escalation_id: int, reason: str = "") -> dict[str, Any]:
         now = utc_now()
         with connect() as conn:
-            row = conn.execute("SELECT * FROM friday_escalations WHERE id = ?", (escalation_id,)).fetchone()
+            row = conn.execute(
+                "SELECT * FROM friday_escalations WHERE id = ? AND is_sandbox = ?",
+                (escalation_id, int(self.is_sandbox)),
+            ).fetchone()
             if not row:
-                raise ValueError(f"Escalation #{escalation_id} not found")
+                raise ValueError(f"Escalation #{escalation_id} not found in this environment")
             conn.execute(
                 "UPDATE friday_escalations SET status = 'rejected', owner_notes = ?, resolved_at = ? WHERE id = ?",
                 (reason or "Rejected by owner", now, escalation_id),
@@ -351,8 +488,9 @@ class FridayPermissionController:
             if tool.name == "release_completed_deliverables":
                 # Ensure payment has been cleared before delivery release
                 inv_num = arguments.get("invoice_number", "")
-                if not self._is_invoice_paid(inv_num):
-                    reason = f"Cannot release deliverables: Invoice {inv_num} has not received verified cleared payment (Gate 3)"
+                task_id = arguments.get("task_id")
+                if not self._is_invoice_paid(inv_num, task_id=task_id):
+                    reason = f"Cannot release deliverables: Invoice {inv_num} has not received verified cleared payment matching Task #{task_id} (Gate 3)"
                     return False, "rejected_safety", reason
                 return True, "approved_auto", "Verified cleared payment confirmed; deliverable dispatch approved"
 
@@ -374,17 +512,28 @@ class FridayPermissionController:
         self.escalation_queue.append(exc)
         logger.warning(f"[FRIDAY ESCALATION] {gate_type}: {description} ({entity_ref})")
 
-    def _is_invoice_paid(self, invoice_number: str) -> bool:
+    def _is_invoice_paid(self, invoice_number: str, task_id: int | None = None) -> bool:
         if not invoice_number:
             return False
         with connect() as conn:
             row = conn.execute(
-                "SELECT status, amount_total, amount_paid FROM invoices WHERE invoice_number = ?",
-                (invoice_number,),
+                "SELECT status, amount_total, amount_paid, task_id, opportunity_id FROM invoices WHERE invoice_number = ? AND is_sandbox = ?",
+                (invoice_number, int(self.is_sandbox)),
             ).fetchone()
             if not row:
                 return False
-            return str(row["status"]).lower() == "paid" and float(row["amount_paid"] or 0) >= float(row["amount_total"])
+            if str(row["status"]).lower() != "paid":
+                return False
+            if float(row["amount_paid"] or 0) < float(row["amount_total"]):
+                return False
+            if task_id is not None:
+                if row["task_id"] is not None and int(row["task_id"]) != int(task_id):
+                    return False
+                t = get_task(task_id)
+                if t and t.get("opportunity_id") and row["opportunity_id"]:
+                    if int(t["opportunity_id"]) != int(row["opportunity_id"]):
+                        return False
+            return True
 
 
 class FridayToolRegistry:
@@ -418,14 +567,51 @@ class FridayToolRegistry:
                 expected_type = props[param].get("type")
                 if expected_type == "string" and not isinstance(val, str):
                     return f"Parameter '{param}' expected string, got {type(val).__name__}"
-                elif expected_type == "integer" and not isinstance(val, int) and not (isinstance(val, float) and val.is_integer()):
-                    return f"Parameter '{param}' expected integer, got {type(val).__name__}"
-                elif expected_type == "number" and not isinstance(val, (int, float)):
-                    return f"Parameter '{param}' expected number, got {type(val).__name__}"
+                elif expected_type == "integer":
+                    if isinstance(val, bool) or not (isinstance(val, int) or (isinstance(val, float) and val.is_integer())):
+                        return f"Parameter '{param}' expected integer, got {type(val).__name__}"
+                elif expected_type == "number":
+                    if isinstance(val, bool) or not isinstance(val, (int, float)):
+                        return f"Parameter '{param}' expected number, got {type(val).__name__}"
                 elif expected_type == "boolean" and not isinstance(val, bool):
                     return f"Parameter '{param}' expected boolean, got {type(val).__name__}"
                 elif expected_type == "object" and not isinstance(val, dict):
                     return f"Parameter '{param}' expected object, got {type(val).__name__}"
+        return None
+
+    def _validate_tool_preconditions(self, tool: ToolDefinition, arguments: dict[str, Any]) -> str | None:
+        """Enforces workflow sequence invariants to prevent out-of-sequence execution."""
+        name = tool.name
+        is_sandbox = int(self.permission_controller.is_sandbox)
+
+        if name == "execute_data_workflow":
+            client_name = arguments.get("client_name", "")
+            with connect() as conn:
+                row = conn.execute(
+                    """
+                    SELECT id FROM friday_accepted_orders
+                    WHERE client_name = ? AND is_sandbox = ? AND status IN ('accepted', 'in_delivery')
+                    LIMIT 1
+                    """,
+                    (client_name, is_sandbox),
+                ).fetchone()
+                if not row:
+                    return f"No accepted customer order found for client '{client_name}'. Acceptance must be registered before execution."
+
+        elif name == "audit_and_verify_deliverables":
+            task_id = arguments.get("task_id")
+            if task_id is not None:
+                t = get_task(task_id)
+                if not t:
+                    return f"Task #{task_id} does not exist."
+
+        elif name == "release_completed_deliverables":
+            task_id = arguments.get("task_id")
+            if task_id is not None:
+                t = get_task(task_id)
+                if not t:
+                    return f"Task #{task_id} does not exist."
+
         return None
 
     def execute_tool(self, name: str, arguments: dict[str, Any]) -> ToolExecutionResult:
@@ -444,6 +630,15 @@ class FridayToolRegistry:
                 tool_name=name,
                 success=False,
                 error_message=f"Schema validation error: {val_err}",
+            )
+
+        # 2. Workflow Sequence Precondition Validation
+        pre_err = self._validate_tool_preconditions(tool, arguments)
+        if pre_err:
+            return ToolExecutionResult(
+                tool_name=name,
+                success=False,
+                error_message=f"Precondition failed: {pre_err}",
             )
 
         allowed, decision, reason = self.permission_controller.evaluate_tool_call(tool, arguments)
@@ -654,16 +849,65 @@ class FridayToolRegistry:
         return {"company_name": company_name, "pitch_text": pitch}
 
     def _tool_dispatch_outreach(self, client_name: str, channel: str, pitch_text: str) -> dict[str, Any]:
-        dispatch_id = f"MSG-{uuid.uuid4().hex[:8].upper()}"
-        ts = utc_now()
-        return {
-            "status": "dispatched",
-            "dispatch_id": dispatch_id,
-            "client_name": client_name,
-            "channel": channel,
-            "dispatched_at": ts,
-            "verification_hash": hashlib.sha256(pitch_text.encode("utf-8")).hexdigest(),
-        }
+        """Dispatches outreach pitch or records draft if no external delivery provider is configured."""
+        supported_channels = {"email", "linkedin"}
+        clean_channel = channel.lower().strip()
+        now = utc_now()
+        pitch_hash = hashlib.sha256(pitch_text.encode("utf-8")).hexdigest()
+        is_sandbox = int(self.permission_controller.is_sandbox)
+
+        if clean_channel not in supported_channels:
+            raise ValueError(
+                f"Unsupported outreach channel '{channel}'. Supported channels: {sorted(supported_channels)}"
+            )
+
+        # Check whether an outreach provider is actually configured in the environment
+        provider = os.environ.get("SOLOEARN_OUTREACH_PROVIDER", "").strip()
+        provider_ack = os.environ.get("SOLOEARN_OUTREACH_ACK", "").strip()
+
+        with connect() as conn:
+            if provider and provider_ack:
+                dispatch_id = f"MSG-{uuid.uuid4().hex[:8].upper()}"
+                conn.execute(
+                    """
+                    INSERT INTO friday_communication_logs (
+                        client_name, channel, recipient, subject, body_text,
+                        provider, provider_message_id, status, error_message, is_sandbox, created_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, 'dispatched', '', ?, ?)
+                    """,
+                    (client_name, clean_channel, f"{client_name} Contact", "SOLOEARN Value Pitch", pitch_text, provider, dispatch_id, is_sandbox, now),
+                )
+                conn.commit()
+                return {
+                    "status": "dispatched",
+                    "dispatch_id": dispatch_id,
+                    "client_name": client_name,
+                    "channel": clean_channel,
+                    "dispatched_at": now,
+                    "provider": provider,
+                    "verification_hash": pitch_hash,
+                }
+            else:
+                conn.execute(
+                    """
+                    INSERT INTO friday_communication_logs (
+                        client_name, channel, recipient, subject, body_text,
+                        provider, provider_message_id, status, error_message, is_sandbox, created_at
+                    ) VALUES (?, ?, ?, ?, ?, 'unconfigured', '', 'drafted_no_provider_configured', 'No external delivery provider configured in environment.', ?, ?)
+                    """,
+                    (client_name, clean_channel, f"{client_name} Contact", "SOLOEARN Value Pitch", pitch_text, is_sandbox, now),
+                )
+                conn.commit()
+                return {
+                    "status": "drafted_no_provider_configured",
+                    "dispatch_id": "",
+                    "client_name": client_name,
+                    "channel": clean_channel,
+                    "dispatched_at": "",
+                    "provider": "unconfigured",
+                    "notes": "Outreach pitch recorded as draft. External dispatch requires configured delivery provider credentials.",
+                    "verification_hash": pitch_hash,
+                }
 
     def _tool_draft_proposal(
         self,
@@ -702,27 +946,96 @@ class FridayToolRegistry:
         if not input_csv_content or not input_csv_content.strip():
             raise ValueError("Customer input dataset required upon order acceptance.")
 
+        is_sandbox = int(self.permission_controller.is_sandbox)
         with connect() as conn:
-            prop = conn.execute("SELECT * FROM proposals WHERE id = ?", (proposal_id,)).fetchone()
+            prop = conn.execute(
+                """
+                SELECT p.*, o.title as opp_title, o.is_sandbox as opp_sandbox, o.amount_inr as opp_amount
+                FROM proposals p
+                JOIN opportunities o ON p.opportunity_id = o.id
+                WHERE p.id = ?
+                """,
+                (proposal_id,),
+            ).fetchone()
             if not prop:
                 raise ValueError(f"Proposal #{proposal_id} not found.")
+
+            if bool(prop["opp_sandbox"]) != bool(self.permission_controller.is_sandbox):
+                raise ValueError(
+                    f"Proposal #{proposal_id} belongs to a different environment "
+                    f"({'sandbox' if prop['opp_sandbox'] else 'production'})."
+                )
+
+            # Invariant: Proposal must belong to this client!
+            clean_client = client_name.strip().lower()
+            prop_text = (prop["draft_text"] or "").lower()
+            opp_title = (prop["opp_title"] or "").lower()
+            if clean_client not in prop_text and clean_client not in opp_title:
+                raise ValueError(
+                    f"Customer acceptance rejected: Proposal #{proposal_id} does not belong to client '{client_name}'."
+                )
+
+            dataset_bytes = input_csv_content.encode("utf-8")
+            dataset_sha256 = hashlib.sha256(dataset_bytes).hexdigest().upper()
+            now = utc_now()
+
+            agreed_price = float(prop["opp_amount"] or 0.0)
+            service_tier = "data_analytics"
+            for tier_spec in SERVICE_PROFIT_SPECS:
+                if tier_spec.tier_id.lower() in prop_text:
+                    service_tier = tier_spec.tier_id
+                    break
+
+            cursor = conn.execute(
+                """
+                INSERT INTO friday_accepted_orders (
+                    client_name, proposal_id, opportunity_id, service_tier,
+                    agreed_price_inr, acceptance_ref, dataset_sha256, dataset_bytes,
+                    status, is_sandbox, accepted_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'accepted', ?, ?)
+                """,
+                (
+                    client_name,
+                    proposal_id,
+                    prop["opportunity_id"],
+                    service_tier,
+                    agreed_price,
+                    acceptance_ref.strip(),
+                    dataset_sha256,
+                    len(dataset_bytes),
+                    is_sandbox,
+                    now,
+                ),
+            )
+            order_id = cursor.lastrowid
+            conn.commit()
 
         self.memory.update_client_session(
             client_name=client_name,
             stage="order_accepted",
+            opportunity_id=prop["opportunity_id"],
             context_updates={
+                "order_id": order_id,
                 "proposal_id": proposal_id,
                 "acceptance_ref": acceptance_ref,
                 "order_accepted": True,
+                "dataset_sha256": dataset_sha256,
+                "service_tier": service_tier,
+                "price_inr": agreed_price,
                 "input_csv_content": input_csv_content,
             },
         )
         return {
             "status": "order_accepted",
+            "order_id": order_id,
             "client_name": client_name,
             "proposal_id": proposal_id,
+            "opportunity_id": prop["opportunity_id"],
             "acceptance_ref": acceptance_ref,
-            "accepted_at": utc_now(),
+            "dataset_sha256": dataset_sha256,
+            "service_tier": service_tier,
+            "agreed_price_inr": agreed_price,
+            "accepted_at": now,
         }
 
     def _tool_execute_workflow(
@@ -739,24 +1052,67 @@ class FridayToolRegistry:
                 "Client must upload their real dataset via the secure portal before processing."
             )
 
-        if opportunity_id is not None:
-            opp = get_opportunity(opportunity_id)
+        is_sandbox = int(self.permission_controller.is_sandbox)
+
+        # Invariant: Verify customer order acceptance and dataset sha256
+        with connect() as conn:
+            order = conn.execute(
+                """
+                SELECT * FROM friday_accepted_orders
+                WHERE client_name = ? AND is_sandbox = ? AND status IN ('accepted', 'in_delivery')
+                ORDER BY id DESC LIMIT 1
+                """,
+                (client_name, is_sandbox),
+            ).fetchone()
+
+        if not order:
+            raise ValueError(
+                f"Cannot execute delivery workflow: No accepted customer order found for client '{client_name}'. "
+                "Client must formally accept a proposal before work begins."
+            )
+
+        csv_bytes = input_csv_content.encode("utf-8")
+        current_sha256 = hashlib.sha256(csv_bytes).hexdigest().upper()
+        if current_sha256 != order["dataset_sha256"].upper():
+            raise ValueError(
+                f"Dataset integrity verification failed: Input CSV SHA-256 ({current_sha256}) "
+                f"does not match the accepted order dataset ({order['dataset_sha256']}). "
+                "Direct execution with fabricated or mismatched data is prohibited."
+            )
+
+        target_opp_id = opportunity_id or order["opportunity_id"]
+        if target_opp_id is not None:
+            opp = get_opportunity(target_opp_id)
             if opp and opp.get("status") == "new":
-                update_opportunity_status(opportunity_id, "approved_for_work")
+                update_opportunity_status(target_opp_id, "approved_for_work")
+
+        with connect() as conn:
+            conn.execute(
+                "UPDATE friday_accepted_orders SET status = 'in_delivery' WHERE id = ?",
+                (order["id"],),
+            )
+            conn.commit()
 
         job = DeliveryEngine.convert_order_to_job(
-            opportunity_id=opportunity_id,
+            opportunity_id=target_opp_id,
             client_name=client_name,
             service_tier=service_tier,
             is_sandbox=self.permission_controller.is_sandbox,
         )
 
-        csv_bytes = input_csv_content.encode("utf-8")
         completed_job, _ = DeliveryEngine.execute_delivery_workflow(
             job,
             file_bytes=csv_bytes,
             filename="input_data.csv",
         )
+
+        with connect() as conn:
+            conn.execute(
+                "UPDATE friday_accepted_orders SET status = 'completed' WHERE id = ?",
+                (order["id"],),
+            )
+            conn.commit()
+
         return asdict(completed_job)
 
     def _tool_audit_deliverables(self, task_id: int, max_revisions: int = 3) -> dict[str, Any]:
@@ -792,25 +1148,166 @@ class FridayToolRegistry:
         t = get_task(task_id)
         if not t:
             raise ValueError(f"Task #{task_id} not found")
+
+        is_sandbox = int(self.permission_controller.is_sandbox)
+
+        # Invariant: Invoice verification matching task
+        with connect() as conn:
+            inv = conn.execute(
+                "SELECT * FROM invoices WHERE invoice_number = ? AND is_sandbox = ?",
+                (invoice_number, is_sandbox),
+            ).fetchone()
+            if not inv:
+                raise ValueError(f"Invoice {invoice_number} not found in this environment")
+            if inv["status"] != "paid" or float(inv["amount_paid"] or 0) < float(inv["amount_total"]):
+                raise ValueError(f"Invoice {invoice_number} has not received verified cleared payment")
+            if inv["task_id"] is not None and int(inv["task_id"]) != int(task_id):
+                raise ValueError(
+                    f"Invoice mismatch: Invoice {invoice_number} belongs to Task #{inv['task_id']}, "
+                    f"not requested Task #{task_id}."
+                )
+
         artifact_path = t.get("artifact_path", "")
         if not artifact_path or not Path(artifact_path).exists():
             raise ValueError(f"Deliverable package not found for task #{task_id}")
 
-        file_bytes = Path(artifact_path).read_bytes()
+        # Check path containment within WORKSPACES_DIR
+        real_artifact = Path(artifact_path).resolve()
+        real_ws_root = Path(core.config.WORKSPACES_DIR).resolve()
+        try:
+            real_artifact.relative_to(real_ws_root)
+        except ValueError:
+            raise ValueError(f"Path traversal detected: Deliverable file {artifact_path} is outside allowed workspaces.")
+
+        file_bytes = real_artifact.read_bytes()
         file_sha256 = hashlib.sha256(file_bytes).hexdigest().upper()
-        download_token = f"dlv_{uuid.uuid4().hex}"
+        now_dt = datetime.now(timezone.utc)
+        now = now_dt.isoformat()
+        expires_at = (now_dt + timedelta(hours=24)).isoformat()
+
+        raw_token = f"dlv_{uuid.uuid4().hex}"
+        token_hash = hashlib.sha256(raw_token.encode("utf-8")).hexdigest()
+
+        client_name = t.get("title", "").replace("Autonomous delivery: ", "").strip() or inv["client_name"]
+
+        with connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO friday_deliverable_tokens (
+                    token, token_hash, task_id, opportunity_id, invoice_number,
+                    client_name, artifact_path, file_sha256, file_size_bytes,
+                    is_downloaded, download_count, max_downloads, expires_at,
+                    created_at, is_sandbox
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 0, 1, ?, ?, ?)
+                """,
+                (
+                    raw_token,
+                    token_hash,
+                    task_id,
+                    inv["opportunity_id"],
+                    invoice_number,
+                    client_name,
+                    str(real_artifact),
+                    file_sha256,
+                    len(file_bytes),
+                    expires_at,
+                    now,
+                    is_sandbox,
+                ),
+            )
+            conn.commit()
 
         return {
             "status": "released",
             "task_id": task_id,
             "invoice_number": invoice_number,
-            "artifact_path": artifact_path,
+            "artifact_path": str(real_artifact),
             "file_sha256": file_sha256,
-            "download_token": download_token,
-            "recipient_email": recipient_email or "client@verified.com",
+            "download_token": raw_token,
+            "recipient_email": recipient_email or "",
             "transfer_method": "signed_portal_download",
-            "released_at": utc_now(),
+            "expires_at": expires_at,
+            "released_at": now,
         }
+
+
+def download_client_deliverable(
+    token: str,
+    is_sandbox: bool = False,
+    request_ip: str = "127.0.0.1",
+) -> tuple[bytes, str, str]:
+    """
+    Validates deliverable download token, enforces expiration, atomic single-use,
+    and returns (file_bytes, filename, file_sha256) while logging the delivery event.
+    """
+    if not token or not token.strip():
+        raise ValueError("Download token required.")
+
+    now_dt = datetime.now(timezone.utc)
+    now = now_dt.isoformat()
+    clean_token = token.strip()
+
+    with connect() as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        cur = conn.execute(
+            """
+            UPDATE friday_deliverable_tokens
+            SET is_downloaded = 1, download_count = download_count + 1, downloaded_at = ?
+            WHERE token = ? AND is_downloaded = 0 AND expires_at > ? AND is_sandbox = ?
+            """,
+            (now, clean_token, now, int(is_sandbox)),
+        )
+        if cur.rowcount == 0:
+            rec = conn.execute(
+                "SELECT * FROM friday_deliverable_tokens WHERE token = ? AND is_sandbox = ?",
+                (clean_token, int(is_sandbox)),
+            ).fetchone()
+            conn.rollback()
+            if not rec:
+                raise ValueError("Invalid or tampered deliverable download token.")
+            if rec["expires_at"] <= now:
+                raise ValueError(f"Download token expired at {rec['expires_at']}.")
+            if rec["is_downloaded"] or rec["download_count"] >= rec["max_downloads"]:
+                raise ValueError("Download token has already been used. Deliverable tokens are single-use.")
+            raise ValueError("Download token rejected.")
+
+        rec = conn.execute(
+            "SELECT * FROM friday_deliverable_tokens WHERE token = ? AND is_sandbox = ?",
+            (clean_token, int(is_sandbox)),
+        ).fetchone()
+
+        artifact_path = Path(rec["artifact_path"])
+        if not artifact_path.exists():
+            conn.rollback()
+            raise ValueError(f"Deliverable package not found at {artifact_path}")
+
+        file_bytes = artifact_path.read_bytes()
+        calculated_sha = hashlib.sha256(file_bytes).hexdigest().upper()
+        if calculated_sha != rec["file_sha256"].upper():
+            conn.rollback()
+            raise ValueError("Deliverable integrity check failed: SHA-256 mismatch.")
+
+        conn.execute(
+            """
+            INSERT INTO friday_delivery_events (
+                token, task_id, client_name, delivery_method, status,
+                bytes_transferred, file_sha256, ip_or_recipient, delivered_at, is_sandbox
+            ) VALUES (?, ?, ?, 'portal_download', 'success', ?, ?, ?, ?, ?)
+            """,
+            (
+                clean_token,
+                rec["task_id"],
+                rec["client_name"],
+                len(file_bytes),
+                calculated_sha,
+                request_ip,
+                now,
+                int(is_sandbox),
+            ),
+        )
+        conn.commit()
+
+    return file_bytes, artifact_path.name, calculated_sha
 
 
 # ===========================================================================

@@ -23,6 +23,7 @@ Verifies the autonomous brain and nervous system of SOLOEARN across all 15 audit
 17. AI Brain LLM integration and prompt injection defense: validates tool arguments and catches hallucinations.
 """
 
+import concurrent.futures
 import hashlib
 import hmac
 import json
@@ -60,6 +61,7 @@ from core.friday_agent import (
     FridayThought,
     FridayToolRegistry,
     ToolDefinition,
+    download_client_deliverable,
     init_friday_tables,
 )
 from core.friday_secure_portal import (
@@ -109,6 +111,46 @@ class TestFridayAgentCore(unittest.TestCase):
         core.config.DATA_DIR = self.orig_data_dir
         core.config.WORKSPACES_DIR = self.orig_workspaces_dir
         self.tmp_dir.cleanup()
+
+    def _create_test_invoice(
+        self,
+        client_name: str = "Test Client",
+        amount: float = 5000.0,
+        is_sandbox: bool = True,
+        task_id: int | None = None,
+        create_artifact: bool = True,
+    ) -> tuple[int, int, dict[str, Any]]:
+        opp_id = add_opportunity({
+            "title": f"Opportunity for {client_name}",
+            "source": "Direct",
+            "amount_inr": amount,
+            "estimated_hours": 2.0,
+            "skill_match": 1.0,
+            "payment_confidence": 1.0,
+            "risk_level": 1.0,
+            "source_permitted": 1,
+        }, score=50.0, is_sandbox=is_sandbox)
+
+        ws = Path(core.config.WORKSPACES_DIR) / f"ws_{opp_id}_{int(time.time()*1000)%10000}"
+        ws.mkdir(parents=True, exist_ok=True)
+        artifact_path = str(ws / "deliverables.zip")
+        if create_artifact:
+            Path(artifact_path).write_bytes(b"PK\x05\x06" + b"\x00" * 18)
+
+        t_id = task_id or create_task(title=f"Task for {client_name}", task_type="data_analytics", workspace=str(ws), opportunity_id=opp_id)
+        update_task_status(t_id, "submission_ready", "QA passed", artifact_path=artifact_path)
+        with connect() as conn:
+            conn.execute("UPDATE opportunities SET status = 'submitted_by_owner' WHERE id = ?", (opp_id,))
+            conn.commit()
+
+        inv = create_invoice(
+            opportunity_id=opp_id,
+            client_name=client_name,
+            amount_subtotal=amount,
+            task_id=t_id,
+            is_sandbox=is_sandbox,
+        )
+        return opp_id, t_id, inv
 
     # -----------------------------------------------------------------------
     # Proof 1: Tool Registry & Parameter Schema Validation
@@ -526,6 +568,494 @@ class TestFridayAgentCore(unittest.TestCase):
         fallback_thought = brain.plan_next_step("drive_revenue", "initial", {"stage": "discovery"})
         self.assertEqual(fallback_thought.proposed_tool, "discover_and_score_prospects")
         self.assertNotEqual(fallback_thought.proposed_tool, "execute_unrestricted_shell_command")
+
+    # -----------------------------------------------------------------------
+    # Regression Test 1 (Audit Item 1): Acceptance with proposal belonging to another client
+    # -----------------------------------------------------------------------
+    def test_10_acceptance_with_proposal_belonging_to_another_client(self):
+        controller = FridayPermissionController(is_sandbox=True)
+        registry = FridayToolRegistry(controller)
+
+        # Create proposal for Client Alpha
+        res_prop = registry.execute_tool(
+            "draft_commercial_proposal",
+            {"client_name": "Client Alpha", "service_tier": "data_analytics", "price_inr": 5000.0},
+        )
+        self.assertTrue(res_prop.success)
+        alpha_prop_id = res_prop.data["proposal_id"]
+
+        # Attempt acceptance by Client Beta with Alpha's proposal_id
+        with self.assertRaises(ValueError) as ctx:
+            registry.get_tool("register_customer_order_acceptance").handler(
+                client_name="Client Beta",
+                proposal_id=alpha_prop_id,
+                acceptance_ref="PO-BETA-999",
+                input_csv_content="col1,col2\nval1,val2",
+            )
+        self.assertIn("does not belong to client 'Client Beta'", str(ctx.exception))
+
+    # -----------------------------------------------------------------------
+    # Regression Test 2 (Audit Item 2): Direct delivery execution without accepted order
+    # -----------------------------------------------------------------------
+    def test_11_direct_delivery_execution_without_accepted_order(self):
+        controller = FridayPermissionController(is_sandbox=True)
+        registry = FridayToolRegistry(controller)
+
+        # Attempt to execute workflow for client with no accepted order
+        res = registry.execute_tool(
+            "execute_data_workflow",
+            {
+                "client_name": "Unaccepted Corp",
+                "service_tier": "data_analytics",
+                "input_csv_content": "id,name\n1,Alpha",
+            },
+        )
+        self.assertFalse(res.success)
+        self.assertIn("No accepted customer order found", res.error_message)
+
+    # -----------------------------------------------------------------------
+    # Regression Test 3 (Audit Item 3): Direct delivery execution with fabricated input (SHA256 mismatch)
+    # -----------------------------------------------------------------------
+    def test_12_direct_delivery_execution_with_fabricated_input_sha256_mismatch(self):
+        controller = FridayPermissionController(is_sandbox=True)
+        registry = FridayToolRegistry(controller)
+
+        # Draft proposal and register acceptance with legitimate dataset
+        res_prop = registry.execute_tool(
+            "draft_commercial_proposal",
+            {"client_name": "Authentic Corp", "service_tier": "data_analytics", "price_inr": 5000.0},
+        )
+        prop_id = res_prop.data["proposal_id"]
+        original_csv = "id,metric\n1,100\n2,200"
+        registry.execute_tool(
+            "register_customer_order_acceptance",
+            {
+                "client_name": "Authentic Corp",
+                "proposal_id": prop_id,
+                "acceptance_ref": "PO-AUTH-01",
+                "input_csv_content": original_csv,
+            },
+        )
+
+        # Attempt execution with fabricated/tampered dataset
+        fabricated_csv = "id,metric\n1,99999\n2,88888"
+        with self.assertRaises(ValueError) as ctx:
+            registry.get_tool("execute_data_workflow").handler(
+                client_name="Authentic Corp",
+                service_tier="data_analytics",
+                input_csv_content=fabricated_csv,
+            )
+        self.assertIn("Dataset integrity verification failed", str(ctx.exception))
+        self.assertIn("does not match the accepted order dataset", str(ctx.exception))
+
+    # -----------------------------------------------------------------------
+    # Regression Test 4 (Audit Item 4): Reusing owner approval with changed price or SLA
+    # -----------------------------------------------------------------------
+    def test_13_reusing_owner_approval_with_changed_price_or_sla(self):
+        controller = FridayPermissionController(is_sandbox=True)
+        registry = FridayToolRegistry(controller)
+
+        # Escalate discount for ₹3,000
+        args_approved = {"client_name": "Bargain Corp", "service_tier": "data_analytics", "price_inr": 3000.0}
+        esc_id = controller.record_escalation("draft_commercial_proposal", args_approved, "Special 40% discount")
+        controller.approve_escalation(esc_id, owner_notes="Approved for Bargain Corp at ₹3000")
+
+        # Caller attempts to use this approval with a DIFFERENT price (₹2,500)
+        args_tampered_price = {"client_name": "Bargain Corp", "service_tier": "data_analytics", "price_inr": 2500.0}
+        res_tampered = registry.execute_tool("draft_commercial_proposal", args_tampered_price)
+        self.assertTrue(res_tampered.blocked_by_permission)
+        self.assertIn("discounted >20%", res_tampered.escalation_reason)
+
+        # Rush SLA without approval is blocked
+        args_rush_sla = {"client_name": "Bargain Corp", "service_tier": "data_analytics", "price_inr": 5000.0, "sla_hours": 12.0}
+        res_rush = registry.execute_tool("draft_commercial_proposal", args_rush_sla)
+        self.assertTrue(res_rush.blocked_by_permission)
+        self.assertIn("under standard 24h limit", res_rush.escalation_reason)
+
+    # -----------------------------------------------------------------------
+    # Regression Test 5 (Audit Item 5): Reusing approval twice (single-use consumption)
+    # -----------------------------------------------------------------------
+    def test_14_reusing_approval_twice_single_use_consumption(self):
+        controller = FridayPermissionController(is_sandbox=True)
+        registry = FridayToolRegistry(controller)
+
+        args = {"client_name": "Single Use Client", "service_tier": "data_analytics", "price_inr": 3500.0}
+        esc_id = controller.record_escalation("draft_commercial_proposal", args, "Introductory pricing")
+        controller.approve_escalation(esc_id, owner_notes="One-time exception")
+
+        # First execution succeeds and atomically consumes the approval
+        res_first = registry.execute_tool("draft_commercial_proposal", args)
+        self.assertTrue(res_first.success)
+
+        # Second execution with identical args MUST be blocked (cannot reuse consumed approval)
+        res_second = registry.execute_tool("draft_commercial_proposal", args)
+        self.assertTrue(res_second.blocked_by_permission)
+        self.assertIn("discounted >20%", res_second.escalation_reason)
+
+    # -----------------------------------------------------------------------
+    # Regression Test 6 (Audit Item 6): Sandbox event attempting to settle production invoice and vice versa
+    # -----------------------------------------------------------------------
+    def test_15_sandbox_event_attempting_to_settle_production_invoice_and_vice_versa(self):
+        secret = "strong_test_secret_for_environment_cross_tests_99"
+        handler_sandbox = FridayPaymentWebhookHandler(webhook_secret=secret, is_sandbox=True)
+        handler_prod = FridayPaymentWebhookHandler(webhook_secret=secret, is_sandbox=False)
+
+        # 1. Create a production invoice
+        _, _, inv_prod = self._create_test_invoice(client_name="Prod Client", amount=6000.0, is_sandbox=False)
+        payload_prod = json.dumps({"invoice_number": inv_prod["invoice_number"], "amount_inr": 6000.0, "transaction_ref": "UTR-PROD-01"}).encode("utf-8")
+        sig_prod = hmac.new(secret.encode("utf-8"), payload_prod, hashlib.sha256).hexdigest()
+
+        # Sandbox handler attempts to process production invoice -> fails closed!
+        with self.assertRaises(ValueError) as ctx_sb:
+            handler_sandbox.process_webhook_event("evt_sb_on_prod", payload_prod, signature=sig_prod)
+        self.assertIn("not found in sandbox environment", str(ctx_sb.exception))
+
+        # 2. Create a sandbox invoice
+        _, _, inv_sb = self._create_test_invoice(client_name="Sandbox Client", amount=4000.0, is_sandbox=True)
+        payload_sb = json.dumps({"invoice_number": inv_sb["invoice_number"], "amount_inr": 4000.0, "transaction_ref": "UTR-SB-01"}).encode("utf-8")
+        sig_sb = hmac.new(secret.encode("utf-8"), payload_sb, hashlib.sha256).hexdigest()
+
+        # Production handler attempts to process sandbox invoice -> fails closed!
+        with self.assertRaises(ValueError) as ctx_pr:
+            handler_prod.process_webhook_event("evt_prod_on_sb", payload_sb, signature=sig_sb)
+        self.assertIn("not found in production environment", str(ctx_pr.exception))
+
+    # -----------------------------------------------------------------------
+    # Regression Test 7 (Audit Item 7): Failed payment event carrying valid signature
+    # -----------------------------------------------------------------------
+    def test_16_failed_payment_event_carrying_valid_signature(self):
+        secret = "strong_test_secret_for_failed_events_888"
+        handler = FridayPaymentWebhookHandler(webhook_secret=secret, is_sandbox=True)
+
+        _, _, inv = self._create_test_invoice(client_name="Failed Payment Client", amount=5000.0, is_sandbox=True)
+        payload_failed = json.dumps({
+            "status": "failed",
+            "invoice_number": inv["invoice_number"],
+            "amount_inr": 5000.0,
+            "transaction_ref": "UTR-FAIL-01",
+        }).encode("utf-8")
+        sig = hmac.new(secret.encode("utf-8"), payload_failed, hashlib.sha256).hexdigest()
+
+        with self.assertRaises(ValueError) as ctx:
+            handler.process_webhook_event("evt_failed_01", payload_failed, signature=sig)
+        self.assertIn("indicates an unsuccessful payment", str(ctx.exception))
+
+        # Invoice must remain unpaid
+        inv_db = get_invoice(inv["id"])
+        self.assertEqual(inv_db["status"], "issued")
+        self.assertEqual(float(inv_db["amount_paid"]), 0.0)
+
+    # -----------------------------------------------------------------------
+    # Regression Test 8 (Audit Item 8): Missing UTR and missing event ID
+    # -----------------------------------------------------------------------
+    def test_17_missing_utr_and_missing_event_id(self):
+        secret = "strong_test_secret_for_missing_fields_777"
+        handler = FridayPaymentWebhookHandler(webhook_secret=secret, is_sandbox=True)
+        _, _, inv = self._create_test_invoice(client_name="Missing Fields Client", amount=5000.0, is_sandbox=True)
+
+        # A. Missing event_id
+        payload_valid = json.dumps({"invoice_number": inv["invoice_number"], "amount_inr": 5000.0, "transaction_ref": "UTR-777"}).encode("utf-8")
+        sig_valid = hmac.new(secret.encode("utf-8"), payload_valid, hashlib.sha256).hexdigest()
+        with self.assertRaises(ValueError) as ctx_eid:
+            handler.process_webhook_event("", payload_valid, signature=sig_valid)
+        self.assertIn("Missing required event_id", str(ctx_eid.exception))
+
+        # B. Missing transaction_ref (UTR) - never synthesize timestamp UTR
+        payload_no_utr = json.dumps({"invoice_number": inv["invoice_number"], "amount_inr": 5000.0}).encode("utf-8")
+        sig_no_utr = hmac.new(secret.encode("utf-8"), payload_no_utr, hashlib.sha256).hexdigest()
+        with self.assertRaises(ValueError) as ctx_utr:
+            handler.process_webhook_event("evt_no_utr", payload_no_utr, signature=sig_no_utr)
+        self.assertIn("Missing required bank transaction reference", str(ctx_utr.exception))
+
+    # -----------------------------------------------------------------------
+    # Regression Test 9 (Audit Item 9): Underpayment, overpayment, NaN, and infinity
+    # -----------------------------------------------------------------------
+    def test_18_underpayment_overpayment_nan_and_infinity(self):
+        secret = "strong_test_secret_for_amount_validation_666"
+        handler = FridayPaymentWebhookHandler(webhook_secret=secret, is_sandbox=True)
+        _, _, inv = self._create_test_invoice(client_name="Amount Client", amount=5000.0, is_sandbox=True)
+
+        # 1. Underpayment (₹4,999 on ₹5,000)
+        p_under = json.dumps({"invoice_number": inv["invoice_number"], "amount_inr": 4999.0, "transaction_ref": "UTR-UNDER"}).encode("utf-8")
+        sig_under = hmac.new(secret.encode("utf-8"), p_under, hashlib.sha256).hexdigest()
+        with self.assertRaises(ValueError) as ctx_under:
+            handler.process_webhook_event("evt_under", p_under, signature=sig_under)
+        self.assertIn("Underpayment received", str(ctx_under.exception))
+
+        # 2. Overpayment (₹5,001 on ₹5,000)
+        p_over = json.dumps({"invoice_number": inv["invoice_number"], "amount_inr": 5001.0, "transaction_ref": "UTR-OVER"}).encode("utf-8")
+        sig_over = hmac.new(secret.encode("utf-8"), p_over, hashlib.sha256).hexdigest()
+        with self.assertRaises(ValueError) as ctx_over:
+            handler.process_webhook_event("evt_over", p_over, signature=sig_over)
+        self.assertIn("Overpayment received", str(ctx_over.exception))
+
+        # 3. NaN amount
+        p_nan = b'{"invoice_number": "' + inv["invoice_number"].encode() + b'", "amount_inr": NaN, "transaction_ref": "UTR-NAN"}'
+        sig_nan = hmac.new(secret.encode("utf-8"), p_nan, hashlib.sha256).hexdigest()
+        with self.assertRaises(ValueError) as ctx_nan:
+            handler.process_webhook_event("evt_nan", p_nan, signature=sig_nan)
+        self.assertTrue("non-finite" in str(ctx_nan.exception) or "Malformed JSON" in str(ctx_nan.exception))
+
+        # 4. Infinity amount
+        p_inf = b'{"invoice_number": "' + inv["invoice_number"].encode() + b'", "amount_inr": Infinity, "transaction_ref": "UTR-INF"}'
+        sig_inf = hmac.new(secret.encode("utf-8"), p_inf, hashlib.sha256).hexdigest()
+        with self.assertRaises(ValueError) as ctx_inf:
+            handler.process_webhook_event("evt_inf", p_inf, signature=sig_inf)
+        self.assertTrue("non-finite" in str(ctx_inf.exception) or "Malformed JSON" in str(ctx_inf.exception))
+
+    # -----------------------------------------------------------------------
+    # Regression Test 10 (Audit Item 10): Reusing one UTR under different event IDs
+    # -----------------------------------------------------------------------
+    def test_19_reusing_one_utr_under_different_event_ids(self):
+        secret = "strong_test_secret_for_utr_uniqueness_555"
+        handler = FridayPaymentWebhookHandler(webhook_secret=secret, is_sandbox=True)
+        _, _, inv1 = self._create_test_invoice(client_name="Client 1", amount=5000.0, is_sandbox=True)
+        _, _, inv2 = self._create_test_invoice(client_name="Client 2", amount=5000.0, is_sandbox=True)
+
+        # Event 1 settles inv1 with UTR-SHARED-123
+        p1 = json.dumps({"invoice_number": inv1["invoice_number"], "amount_inr": 5000.0, "transaction_ref": "UTR-SHARED-123"}).encode("utf-8")
+        sig1 = hmac.new(secret.encode("utf-8"), p1, hashlib.sha256).hexdigest()
+        res1 = handler.process_webhook_event("evt_event_alpha", p1, signature=sig1)
+        self.assertEqual(res1["status"], "settled")
+
+        # Event 2 with DIFFERENT event_id attempts to use the SAME UTR-SHARED-123 for inv2
+        p2 = json.dumps({"invoice_number": inv2["invoice_number"], "amount_inr": 5000.0, "transaction_ref": "UTR-SHARED-123"}).encode("utf-8")
+        sig2 = hmac.new(secret.encode("utf-8"), p2, hashlib.sha256).hexdigest()
+        with self.assertRaises(ValueError) as ctx:
+            handler.process_webhook_event("evt_event_beta", p2, signature=sig2)
+        self.assertIn("Duplicate transaction reference", str(ctx.exception))
+        self.assertIn("UTR-SHARED-123", str(ctx.exception))
+
+    # -----------------------------------------------------------------------
+    # Regression Test 11 (Audit Item 11): Concurrent duplicate webhook delivery
+    # -----------------------------------------------------------------------
+    def test_20_concurrent_duplicate_webhook_delivery(self):
+        secret = "strong_test_secret_concurrent_webhooks_444"
+        handler = FridayPaymentWebhookHandler(webhook_secret=secret, is_sandbox=True)
+        _, _, inv = self._create_test_invoice(client_name="Concurrent Webhook Client", amount=5000.0, is_sandbox=True)
+
+        payload = json.dumps({"invoice_number": inv["invoice_number"], "amount_inr": 5000.0, "transaction_ref": "UTR-CONC-444"}).encode("utf-8")
+        sig = hmac.new(secret.encode("utf-8"), payload, hashlib.sha256).hexdigest()
+
+        def _send_webhook():
+            try:
+                return handler.process_webhook_event("evt_conc_444", payload, signature=sig)
+            except Exception as e:
+                return {"error": str(e)}
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=4) as executor:
+            futures = [executor.submit(_send_webhook) for _ in range(4)]
+            results = [f.result() for f in concurrent.futures.as_completed(futures)]
+
+        settled_count = sum(1 for r in results if r.get("status") == "settled")
+        dup_or_err_count = sum(1 for r in results if r.get("status") in {"already_settled", "duplicate_ignored"} or "error" in r)
+
+        self.assertEqual(settled_count, 1)
+        self.assertEqual(settled_count + dup_or_err_count, 4)
+
+    # -----------------------------------------------------------------------
+    # Regression Test 12 (Audit Item 12): Concurrent single-use upload-token requests
+    # -----------------------------------------------------------------------
+    def test_21_concurrent_single_use_upload_token_requests(self):
+        portal = FridaySecurePortal(is_sandbox=True)
+        token = portal.generate_upload_token("Concurrent Upload Client", validity_hours=24)
+        csv_bytes = b"id,val\n1,100"
+
+        def _upload():
+            try:
+                return portal.validate_and_ingest_file(token, "test.csv", csv_bytes)
+            except Exception as e:
+                return {"error": str(e)}
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=4) as executor:
+            futures = [executor.submit(_upload) for _ in range(4)]
+            results = [f.result() for f in concurrent.futures.as_completed(futures)]
+
+        success_count = sum(1 for r in results if r.get("status") == "ingested")
+        rejected_count = sum(1 for r in results if "error" in r and "already been used" in r["error"])
+
+        self.assertEqual(success_count, 1)
+        self.assertEqual(rejected_count, 3)
+
+    # -----------------------------------------------------------------------
+    # Regression Test 13 (Audit Item 13): Paid invoice belonging to a different task
+    # -----------------------------------------------------------------------
+    def test_22_paid_invoice_belonging_to_different_task(self):
+        controller = FridayPermissionController(is_sandbox=True)
+        registry = FridayToolRegistry(controller)
+
+        # Create Task 1 & paid Invoice 1
+        _, t1, inv1 = self._create_test_invoice(client_name="Client 1", amount=5000.0, is_sandbox=True)
+
+        # Settle Invoice 1
+        secret = "secret_t22"
+        h = FridayPaymentWebhookHandler(webhook_secret=secret, is_sandbox=True)
+        p1 = json.dumps({"invoice_number": inv1["invoice_number"], "amount_inr": 5000.0, "transaction_ref": "UTR-T22-01"}).encode()
+        h.process_webhook_event("evt_t22_01", p1, signature=hmac.new(secret.encode(), p1, hashlib.sha256).hexdigest())
+
+        # Create Task 2 & unpaid Invoice 2
+        _, t2, inv2 = self._create_test_invoice(client_name="Client 2", amount=5000.0, is_sandbox=True)
+
+        # Attempt to release Task 2 using Invoice 1's number -> blocked!
+        res_cross = registry.execute_tool("release_completed_deliverables", {"task_id": t2, "invoice_number": inv1["invoice_number"]})
+        self.assertTrue(res_cross.blocked_by_permission)
+        self.assertIn("matching Task #", res_cross.escalation_reason)
+
+    # -----------------------------------------------------------------------
+    # Regression Test 14 (Audit Item 14): Download-token expiry, tampering, and replay
+    # -----------------------------------------------------------------------
+    def test_23_download_token_expiry_tampering_and_replay(self):
+        controller = FridayPermissionController(is_sandbox=True)
+        registry = FridayToolRegistry(controller)
+
+        opp, t_id, inv = self._create_test_invoice(client_name="DL Client", amount=5000.0, is_sandbox=True, create_artifact=False)
+
+        # Write custom content to task's artifact_path
+        t = get_task(t_id)
+        pkg = Path(t["artifact_path"])
+        content = b"PK\x05\x06" + b"TEST_PAYLOAD" + b"\x00" * 10
+        pkg.write_bytes(content)
+        expected_sha = hashlib.sha256(content).hexdigest().upper()
+
+        # Settle invoice
+        secret = "secret_t23"
+        h = FridayPaymentWebhookHandler(webhook_secret=secret, is_sandbox=True)
+        p = json.dumps({"invoice_number": inv["invoice_number"], "amount_inr": 5000.0, "transaction_ref": "UTR-T23"}).encode()
+        h.process_webhook_event("evt_t23", p, signature=hmac.new(secret.encode(), p, hashlib.sha256).hexdigest())
+
+        # Release deliverable
+        rel = registry.execute_tool("release_completed_deliverables", {"task_id": t_id, "invoice_number": inv["invoice_number"]})
+        self.assertTrue(rel.success)
+        token = rel.data["download_token"]
+
+        # A. Tampered token rejected
+        with self.assertRaises(ValueError) as ctx_tamper:
+            download_client_deliverable("dlv_tampered_invalid_token", is_sandbox=True)
+        self.assertIn("Invalid or tampered", str(ctx_tamper.exception))
+
+        # B. Valid download succeeds and logs event
+        file_bytes, filename, file_sha = download_client_deliverable(token, is_sandbox=True, request_ip="10.0.0.1")
+        self.assertEqual(file_bytes, content)
+        self.assertEqual(file_sha, expected_sha)
+
+        with connect() as conn:
+            evt = conn.execute("SELECT * FROM friday_delivery_events WHERE token = ?", (token,)).fetchone()
+            self.assertIsNotNone(evt)
+            self.assertEqual(evt["status"], "success")
+            self.assertEqual(evt["ip_or_recipient"], "10.0.0.1")
+
+        # C. Replay attempt rejected (single-use)
+        with self.assertRaises(ValueError) as ctx_replay:
+            download_client_deliverable(token, is_sandbox=True)
+        self.assertIn("already been used", str(ctx_replay.exception))
+
+        # D. Expired token rejected
+        with connect() as conn:
+            conn.execute(
+                "UPDATE friday_deliverable_tokens SET is_downloaded = 0, download_count = 0, expires_at = '2020-01-01T00:00:00+00:00' WHERE token = ?",
+                (token,),
+            )
+            conn.commit()
+
+        with self.assertRaises(ValueError) as ctx_exp:
+            download_client_deliverable(token, is_sandbox=True)
+        self.assertIn("expired", str(ctx_exp.exception))
+
+    # -----------------------------------------------------------------------
+    # Regression Test 15 (Audit Item 15): Outreach message reported truthfully without provider
+    # -----------------------------------------------------------------------
+    def test_24_outreach_message_reported_truthfully_without_provider(self):
+        controller = FridayPermissionController(is_sandbox=True)
+        registry = FridayToolRegistry(controller)
+
+        # Clear outreach env vars if set
+        orig_provider = os.environ.get("SOLOEARN_OUTREACH_PROVIDER")
+        orig_ack = os.environ.get("SOLOEARN_OUTREACH_ACK")
+        try:
+            os.environ.pop("SOLOEARN_OUTREACH_PROVIDER", None)
+            os.environ.pop("SOLOEARN_OUTREACH_ACK", None)
+
+            # In unconfigured environment, dispatch_outreach_pitch records draft, NEVER claims dispatched
+            res = registry.get_tool("dispatch_outreach_pitch").handler(
+                client_name="Prospect Inc",
+                channel="email",
+                pitch_text="Hello, we offer automated analytics pipelines.",
+            )
+            self.assertEqual(res["status"], "drafted_no_provider_configured")
+            self.assertEqual(res["provider"], "unconfigured")
+            self.assertEqual(res["dispatch_id"], "")
+
+            with connect() as conn:
+                log = conn.execute("SELECT * FROM friday_communication_logs WHERE client_name = 'Prospect Inc'").fetchone()
+                self.assertIsNotNone(log)
+                self.assertEqual(log["status"], "drafted_no_provider_configured")
+
+            # Unsupported channel rejected
+            with self.assertRaises(ValueError) as ctx_unsupp:
+                registry.get_tool("dispatch_outreach_pitch").handler(
+                    client_name="Prospect Inc",
+                    channel="fax",
+                    pitch_text="Hello",
+                )
+            self.assertIn("Unsupported outreach channel", str(ctx_unsupp.exception))
+
+            # When provider is configured with ack
+            os.environ["SOLOEARN_OUTREACH_PROVIDER"] = "mock_sendgrid"
+            os.environ["SOLOEARN_OUTREACH_ACK"] = "ack_sg_12345"
+            res_ack = registry.get_tool("dispatch_outreach_pitch").handler(
+                client_name="Prospect Inc",
+                channel="email",
+                pitch_text="Hello, with real ack.",
+            )
+            self.assertEqual(res_ack["status"], "dispatched")
+            self.assertTrue(res_ack["dispatch_id"].startswith("MSG-"))
+        finally:
+            if orig_provider:
+                os.environ["SOLOEARN_OUTREACH_PROVIDER"] = orig_provider
+            else:
+                os.environ.pop("SOLOEARN_OUTREACH_PROVIDER", None)
+            if orig_ack:
+                os.environ["SOLOEARN_OUTREACH_ACK"] = orig_ack
+            else:
+                os.environ.pop("SOLOEARN_OUTREACH_ACK", None)
+
+    # -----------------------------------------------------------------------
+    # Regression Test 16 (Audit Item 16): LLM requesting registered but out-of-sequence tool
+    # -----------------------------------------------------------------------
+    def test_25_llm_requesting_registered_but_out_of_sequence_tool(self):
+        controller = FridayPermissionController(is_sandbox=True)
+        registry = FridayToolRegistry(controller)
+
+        # 1. LLM attempts to execute workflow before order acceptance
+        res_wf = registry.execute_tool(
+            "execute_data_workflow",
+            {
+                "client_name": "Out Of Sequence Corp",
+                "service_tier": "data_analytics",
+                "input_csv_content": "id,val\n1,10",
+            },
+        )
+        self.assertFalse(res_wf.success)
+        self.assertIn("Precondition failed", res_wf.error_message)
+        self.assertIn("No accepted customer order found", res_wf.error_message)
+
+        # 2. LLM attempts to audit deliverables for a non-existent task
+        res_qa = registry.execute_tool(
+            "audit_and_verify_deliverables",
+            {"task_id": 999999},
+        )
+        self.assertFalse(res_qa.success)
+        self.assertIn("Precondition failed", res_qa.error_message)
+        self.assertIn("does not exist", res_qa.error_message)
+
+        # 3. LLM attempts to release deliverables for a non-existent task
+        res_rel = registry.execute_tool(
+            "release_completed_deliverables",
+            {"task_id": 888888, "invoice_number": "INV-NONE"},
+        )
+        self.assertFalse(res_rel.success)
+        self.assertIn("Precondition failed", res_rel.error_message)
+        self.assertIn("does not exist", res_rel.error_message)
 
 
 if __name__ == "__main__":
