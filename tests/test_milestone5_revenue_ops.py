@@ -49,6 +49,7 @@ class Milestone5RevenueOpsTests(unittest.TestCase):
             conn.execute("DELETE FROM opportunities")
             conn.execute("DELETE FROM discovery_sources")
             conn.execute("DELETE FROM audit_log")
+            conn.execute("DELETE FROM financial_transactions WHERE is_sandbox = 1")
 
     # --- Security Hardening: SSRF, DNS & XXE ---
 
@@ -297,6 +298,7 @@ class Milestone5RevenueOpsTests(unittest.TestCase):
             tax_rate=18.0,
             task_id=task_id,
             notes="Completed with 100% QA pass.",
+            is_sandbox=True,
         )
         self.assertEqual(invoice["amount_subtotal"], 25000.0)
         self.assertEqual(invoice["tax_amount"], 4500.0)

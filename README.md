@@ -2,7 +2,7 @@
 
 A local-first, profit-optimized private operations engine for B2B analytics and business process automation. SOLOEARN couples deterministic service delivery workflows with **FRIDAY**—an autonomous AI agent core governed by a strict, fail-closed permission nervous system.
 
-> **Commercial Reality Notice:** All software engineering benchmarks and architectural capability proofs in this repository have passed automated testing (224 passed, 2 skipped across 226 discovered tests; 7/7 local preflight checks). However, software tests do **not** constitute realized business income. The live commercial ledger remains at `paying_customers: 0, revenue: ₹0.00, customer_advances: ₹0.00`. Realizing revenue requires completing the 9 real-world onboarding steps (Kotak Safalta Current Account, Kotak.biz merchant activation, and live client acquisition).
+> **Commercial Reality Notice:** All software engineering benchmarks and architectural capability proofs in this repository have passed automated testing (225 passed, 2 skipped across 227 discovered tests; 7/7 local preflight checks). However, software tests do **not** constitute realized business income. The live commercial ledger remains at `paying_customers: 0, revenue: ₹0.00, customer_advances: ₹0.00`. Realizing revenue requires completing the 9 real-world onboarding steps (Kotak Safalta Current Account, Kotak.biz merchant activation, and live client acquisition).
 
 ---
 
@@ -69,20 +69,33 @@ A local-first, profit-optimized private operations engine for B2B analytics and 
 
 ### Test Suite Execution
 ```bash
-# Run FRIDAY Agent Core 8-proof suite
+# Run FRIDAY Agent Core 9-proof suite (17 audit dimensions)
 python -m unittest tests.test_friday_agent_core
 
-# Run complete regression discovery suite (226 tests)
+# Run complete regression discovery suite (227 tests: 225 passed, 2 skipped, 0 failures)
 python -m unittest discover -s tests
 
-# Run Stage A Local Preflight verification (7 steps)
+# Run Stage A Local Preflight verification (7/7 steps passed)
 python scripts/run_m7_local_preflight.py
 ```
 
-### Archive Checksum
-- Archive: `SOLOEARN_Friday_Agent_Core_Ready.zip` (328,757 bytes)
-- Base64 ASCII: `SOLOEARN_Friday_Agent_Core_Ready.zip.b64.txt` (438,344 chars)
-- **SHA256**: `E2CA5E1F99BEB32860CDB7B1AF8E683F1386E24B589F358A98A62053F913CDE0`
+### Archive Checksum (M8.0.2 Corrective Release)
+- Archive: `SOLOEARN_Friday_Agent_Core_Ready.zip` (343,099 bytes)
+- Base64 ASCII: `SOLOEARN_Friday_Agent_Core_Ready.zip.b64.txt` (457,468 chars)
+- **SHA256**: `4730871A8F73CEDA66A38E93E8CEB3C2716E0350A65A3B1568B72B28C94ABBEA`
+
+### M8.0.2 Corrective Audit Fixes
+Following an independent static code audit of FRIDAY F1–F7 on GitHub, the following 10 real defects were identified and resolved:
+1. **Real AI LLM Reasoning Connection**: Connected `OllamaClient.chat()` directly to `FridayBrain.plan_next_step()`, passing dynamic JSON tool catalogues, enforcing prompt injection/hallucination defenses, and maintaining deterministic fallback.
+2. **Fake Customer Data Fallback Removed**: Eradicated the 3-row sample dataset fallback in `_tool_execute_workflow()`. Workflows fail closed if client dataset is missing.
+3. **Formal Customer Order Acceptance Gating**: Stopped jumping automatically from commercial proposal to execution; registered tool `register_customer_order_acceptance` requiring customer PO/ref and verified dataset upload before job execution.
+4. **Payment Webhook Security & Idempotency**: Banned default secrets in production (`is_sandbox=False` strictly requires $\ge 32$-character custom secret); enforced exact invoice total matching; prevented duplicate bank UTR replay; implemented idempotent event shielding.
+5. **Client Upload Token Expiry & CSV Sanitization**: Fixed token expiration calculation using `timedelta(hours=validity_hours)`; enforced single-use; replaced naive `.split(",")` with `csv.reader`/`csv.writer` preserving quoted fields with embedded commas and legitimate negative numbers.
+6. **Cross-Environment SQLite Isolation**: Added `is_sandbox` to compound unique constraints in `friday_memories` and `friday_client_sessions`.
+7. **Tool Registry Parameter Schema Validation**: Added strict type and required-field validation against JSON parameter schemas in `FridayToolRegistry.execute_tool()`.
+8. **Persistent Owner Escalation**: Implemented `friday_escalations` table and approval resume workflow; gated actions proceed upon owner authorization.
+9. **Delivery Release Manifest**: Deliverable release verifies cleared payment, generates signed download tokens (`dlv_...`), and computes SHA256 checksums.
+10. **Database Append-Only Immutability**: Added SQLite triggers on `friday_action_logs` and `financial_transactions` physically blocking `UPDATE` and `DELETE` on production records (`is_sandbox = 0`).
 
 
 ## What works in v0.6.1.2

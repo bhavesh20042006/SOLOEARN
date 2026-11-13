@@ -48,7 +48,7 @@ class Milestone5HardeningTests(unittest.TestCase):
             conn.execute("DELETE FROM opportunities")
             conn.execute("DELETE FROM discovery_sources")
             conn.execute("DELETE FROM audit_log")
-            conn.execute("DELETE FROM financial_transactions WHERE reference_id LIKE 'INV-%'")
+            conn.execute("DELETE FROM financial_transactions WHERE is_sandbox = 1")
 
     @classmethod
     def tearDownClass(cls):
@@ -62,7 +62,7 @@ class Milestone5HardeningTests(unittest.TestCase):
             conn.execute("DELETE FROM opportunities")
             conn.execute("DELETE FROM discovery_sources")
             conn.execute("DELETE FROM audit_log")
-            conn.execute("DELETE FROM financial_transactions WHERE reference_id LIKE 'INV-%'")
+            conn.execute("DELETE FROM financial_transactions WHERE is_sandbox = 1")
 
     def _submitted_opportunity_with_task(self, title: str) -> tuple[int, int]:
         opportunity_id = add_opportunity(
@@ -363,7 +363,7 @@ class Milestone5HardeningTests(unittest.TestCase):
 
     def test_payment_verification_requires_boolean_confirmation_and_numeric_amount(self):
         opportunity_id, _task_id = self._submitted_opportunity_with_task("Payment input validation")
-        invoice = create_invoice(opportunity_id, "Client", amount_subtotal=1000)
+        invoice = create_invoice(opportunity_id, "Client", amount_subtotal=1000, is_sandbox=True)
         with self.assertRaises(ValueError):
             verify_invoice_payment(invoice["id"], "UTR-TRUE-1", 1000, owner_confirmation="true")  # type: ignore[arg-type]
         with self.assertRaises(ValueError):
@@ -372,8 +372,8 @@ class Milestone5HardeningTests(unittest.TestCase):
     def test_invoice_payment_reference_cannot_be_reused(self):
         opp1, _task1 = self._submitted_opportunity_with_task("First invoice")
         opp2, _task2 = self._submitted_opportunity_with_task("Second invoice")
-        inv1 = create_invoice(opp1, "Client One", amount_subtotal=1000)
-        inv2 = create_invoice(opp2, "Client Two", amount_subtotal=1000)
+        inv1 = create_invoice(opp1, "Client One", amount_subtotal=1000, is_sandbox=True)
+        inv2 = create_invoice(opp2, "Client Two", amount_subtotal=1000, is_sandbox=True)
         verify_invoice_payment(inv1["id"], "UTR-SHARED-123", 1000, owner_confirmation=True)
         with self.assertRaises(ValueError):
             verify_invoice_payment(inv2["id"], "UTR-SHARED-123", 1000, owner_confirmation=True)
@@ -381,8 +381,8 @@ class Milestone5HardeningTests(unittest.TestCase):
     def test_concurrent_payment_verification_cannot_double_use_reference(self):
         opp1, _task1 = self._submitted_opportunity_with_task("Concurrent invoice one")
         opp2, _task2 = self._submitted_opportunity_with_task("Concurrent invoice two")
-        inv1 = create_invoice(opp1, "Client One", amount_subtotal=1250)
-        inv2 = create_invoice(opp2, "Client Two", amount_subtotal=1250)
+        inv1 = create_invoice(opp1, "Client One", amount_subtotal=1250, is_sandbox=True)
+        inv2 = create_invoice(opp2, "Client Two", amount_subtotal=1250, is_sandbox=True)
         barrier = threading.Barrier(2)
         outcomes: list[str] = []
         lock = threading.Lock()

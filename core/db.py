@@ -187,6 +187,22 @@ def init_db() -> None:
                 FOREIGN KEY(linked_tx_id) REFERENCES financial_transactions(id)
             );
 
+            CREATE TRIGGER IF NOT EXISTS trg_financial_transactions_no_update
+            BEFORE UPDATE ON financial_transactions
+            FOR EACH ROW
+            WHEN OLD.is_sandbox = 0
+            BEGIN
+                SELECT RAISE(ABORT, 'financial_transactions is an append-only ledger for production records: updates are prohibited.');
+            END;
+
+            CREATE TRIGGER IF NOT EXISTS trg_financial_transactions_no_delete
+            BEFORE DELETE ON financial_transactions
+            FOR EACH ROW
+            WHEN OLD.is_sandbox = 0
+            BEGIN
+                SELECT RAISE(ABORT, 'financial_transactions is an append-only ledger for production records: deletions are prohibited.');
+            END;
+
             CREATE TABLE IF NOT EXISTS tax_profiles (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 profile_name TEXT NOT NULL,

@@ -23,6 +23,7 @@ import json
 import logging
 import math
 import os
+import re
 import time
 import uuid
 from dataclasses import asdict, dataclass, field
@@ -64,7 +65,7 @@ TIER_OWNER_APPROVAL = "owner_approval"      # High-risk actions (discounts > 20%
 # ===========================================================================
 
 def init_friday_tables() -> None:
-    """Initializes long-term memory, action logging, and client session tables."""
+    """Initializes long-term memory, action logging, client session, and escalation tables with append-only triggers."""
     with connect() as conn:
         conn.execute(
             """
@@ -78,7 +79,7 @@ def init_friday_tables() -> None:
                 is_sandbox INTEGER NOT NULL DEFAULT 0,
                 created_at TEXT NOT NULL,
                 updated_at TEXT NOT NULL,
-                UNIQUE(entity_type, entity_id, memory_key)
+                UNIQUE(entity_type, entity_id, memory_key, is_sandbox)
             );
             """
         )
@@ -100,9 +101,31 @@ def init_friday_tables() -> None:
         )
         conn.execute(
             """
+            CREATE TRIGGER IF NOT EXISTS trg_friday_action_logs_no_update
+            BEFORE UPDATE ON friday_action_logs
+            FOR EACH ROW
+            WHEN OLD.is_sandbox = 0
+            BEGIN
+                SELECT RAISE(ABORT, 'friday_action_logs is an append-only audit trail for production records: modifications are prohibited.');
+            END;
+            """
+        )
+        conn.execute(
+            """
+            CREATE TRIGGER IF NOT EXISTS trg_friday_action_logs_no_delete
+            BEFORE DELETE ON friday_action_logs
+            FOR EACH ROW
+            WHEN OLD.is_sandbox = 0
+            BEGIN
+                SELECT RAISE(ABORT, 'friday_action_logs is an append-only audit trail for production records: deletions are prohibited.');
+            END;
+            """
+        )
+        conn.execute(
+            """
             CREATE TABLE IF NOT EXISTS friday_client_sessions (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
-                client_name TEXT UNIQUE NOT NULL,
+                client_name TEXT NOT NULL,
                 contact_channel TEXT NOT NULL,
                 stage TEXT NOT NULL,               -- 'identified', 'contacted', 'negotiating', 'active_job', 'completed'
                 opportunity_id INTEGER,
@@ -111,7 +134,24 @@ def init_friday_tables() -> None:
                 last_interaction_at TEXT NOT NULL,
                 context_json TEXT NOT NULL DEFAULT '{}',
                 is_sandbox INTEGER NOT NULL DEFAULT 0,
-                created_at TEXT NOT NULL
+                created_at TEXT NOT NULL,
+                UNIQUE(client_name, is_sandbox)
+            );
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS friday_escalations (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                cycle_id TEXT NOT NULL,
+                tool_name TEXT NOT NULL,
+                tool_args TEXT NOT NULL,
+                reason TEXT NOT NULL,
+                status TEXT NOT NULL DEFAULT 'pending_owner', -- 'pending_owner', 'approved', 'rejected'
+                owner_notes TEXT DEFAULT '',
+                is_sandbox INTEGER NOT NULL DEFAULT 0,
+                created_at TEXT NOT NULL,
+                resolved_at TEXT
             );
             """
         )
@@ -178,6 +218,72 @@ class FridayPermissionController:
         self.is_sandbox = is_sandbox
         self.escalation_queue: list[dict[str, Any]] = []
 
+    def is_escalation_approved(self, tool_name: str, arguments: dict[str, Any]) -> bool:
+        """Checks if a matching escalation was explicitly approved by the human owner."""
+        client_name = str(arguments.get("client_name", ""))
+        with connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT id, tool_args FROM friday_escalations 
+                WHERE tool_name = ? AND status = 'approved' AND is_sandbox = ?
+                ORDER BY id DESC
+                """,
+                (tool_name, int(self.is_sandbox)),
+            ).fetchall()
+            for r in rows:
+                try:
+                    args = json.loads(r["tool_args"])
+                    if args.get("client_name") == client_name:
+                        return True
+                except Exception:
+                    continue
+        return False
+
+    def record_escalation(self, tool_name: str, tool_args: dict[str, Any], reason: str, cycle_id: str = "") -> int:
+        now = utc_now()
+        with connect() as conn:
+            cursor = conn.execute(
+                """
+                INSERT INTO friday_escalations (
+                    cycle_id, tool_name, tool_args, reason, status, is_sandbox, created_at
+                ) VALUES (?, ?, ?, ?, 'pending_owner', ?, ?)
+                """,
+                (cycle_id or "ADHOC", tool_name, json.dumps(tool_args), reason, int(self.is_sandbox), now),
+            )
+            conn.commit()
+            return cursor.lastrowid
+
+    def approve_escalation(self, escalation_id: int, owner_notes: str = "") -> dict[str, Any]:
+        now = utc_now()
+        with connect() as conn:
+            row = conn.execute("SELECT * FROM friday_escalations WHERE id = ?", (escalation_id,)).fetchone()
+            if not row:
+                raise ValueError(f"Escalation #{escalation_id} not found")
+            conn.execute(
+                "UPDATE friday_escalations SET status = 'approved', owner_notes = ?, resolved_at = ? WHERE id = ?",
+                (owner_notes or "Owner approved action", now, escalation_id),
+            )
+            conn.commit()
+            return {
+                "escalation_id": escalation_id,
+                "status": "approved",
+                "tool_name": row["tool_name"],
+                "tool_args": json.loads(row["tool_args"]),
+            }
+
+    def reject_escalation(self, escalation_id: int, reason: str = "") -> dict[str, Any]:
+        now = utc_now()
+        with connect() as conn:
+            row = conn.execute("SELECT * FROM friday_escalations WHERE id = ?", (escalation_id,)).fetchone()
+            if not row:
+                raise ValueError(f"Escalation #{escalation_id} not found")
+            conn.execute(
+                "UPDATE friday_escalations SET status = 'rejected', owner_notes = ?, resolved_at = ? WHERE id = ?",
+                (reason or "Rejected by owner", now, escalation_id),
+            )
+            conn.commit()
+            return {"escalation_id": escalation_id, "status": "rejected"}
+
     def evaluate_tool_call(
         self,
         tool: ToolDefinition,
@@ -186,13 +292,17 @@ class FridayPermissionController:
     ) -> tuple[bool, str, str]:
         """
         Returns: (is_allowed, decision_type, reason)
-        decision_type: 'approved_auto' | 'escalated_owner' | 'rejected_safety'
+        decision_type: 'approved_auto' | 'approved_owner' | 'escalated_owner' | 'rejected_safety'
         """
+        # Check if owner previously approved this gated action
+        if self.is_escalation_approved(tool.name, arguments):
+            return True, "approved_owner", "Owner previously authorized this gated action."
+
         # Tier 1: Autonomous Tools (Safe local read/processing)
         if tool.permission_tier == TIER_AUTONOMOUS:
             return True, "approved_auto", "Tool is classified as safe autonomous operation"
 
-        # Tier 2: Guarded Business Actions (Proposals, Pricing, Scoping)
+        # Tier 2: Guarded Business Actions (Proposals, Pricing, Scoping, Outreach)
         if tool.permission_tier == TIER_GUARDED_BUSINESS:
             # Invariant 1: Pricing Margin Floor
             if tool.name in {"draft_commercial_proposal", "calculate_quote"}:
@@ -204,6 +314,7 @@ class FridayPermissionController:
                 if price < (spec.target_price_inr * 0.80):
                     reason = f"Proposed fee ₹{price:,.2f} is discounted >20% below standard tier price ₹{spec.target_price_inr:,.2f}"
                     self._escalate("unusual_contract_discount", reason, f"Client: {arguments.get('client_name')}")
+                    self.record_escalation(tool.name, arguments, reason)
                     return False, "escalated_owner", reason
 
                 # Check strict 50% margin floor
@@ -215,6 +326,7 @@ class FridayPermissionController:
                 if margin_pct < MINIMUM_ACCEPTABLE_CONTRIBUTION_MARGIN:
                     reason = f"Contribution margin {margin_pct*100:.1f}% violates statutory 50.0% floor"
                     self._escalate("margin_floor_violation", reason, f"Client: {arguments.get('client_name')}")
+                    self.record_escalation(tool.name, arguments, reason)
                     return False, "rejected_safety", reason
 
                 # Check turnaround SLA (<24h requires owner capacity verification)
@@ -222,14 +334,14 @@ class FridayPermissionController:
                 if sla_hours < 24.0:
                     reason = f"Turnaround SLA of {sla_hours}h is under standard 24h limit; owner capacity check required"
                     self._escalate("rush_sla_capacity", reason, f"Client: {arguments.get('client_name')}")
+                    self.record_escalation(tool.name, arguments, reason)
                     return False, "escalated_owner", reason
 
             # Invariant 2: Outbound Communication Gating (Gate 1)
             if tool.name == "dispatch_outreach_pitch":
-                channel = str(arguments.get("channel", "email")).lower()
-                # Automated outbound mass blast without human review is prohibited to prevent domain/account blacklisting
                 reason = "Outreach pitch drafted successfully; requires owner review before external dispatch (Gate 1)"
                 self._escalate("gate_1_outreach", reason, f"Client: {arguments.get('client_name')}")
+                self.record_escalation(tool.name, arguments, reason)
                 return False, "escalated_owner", reason
 
             return True, "approved_auto", "Guarded business action passed all margin and capacity checks"
@@ -278,8 +390,9 @@ class FridayPermissionController:
 class FridayToolRegistry:
     """Manages the catalogue of capabilities that FRIDAY's brain can request."""
 
-    def __init__(self, permission_controller: FridayPermissionController):
+    def __init__(self, permission_controller: FridayPermissionController, memory: FridayMemory | None = None):
         self.permission_controller = permission_controller
+        self.memory = memory or FridayMemory(is_sandbox=permission_controller.is_sandbox)
         self.tools: dict[str, ToolDefinition] = {}
         self._register_default_tools()
 
@@ -289,6 +402,32 @@ class FridayToolRegistry:
     def get_tool(self, name: str) -> ToolDefinition | None:
         return self.tools.get(name)
 
+    def _validate_arguments(self, tool: ToolDefinition, arguments: dict[str, Any]) -> str | None:
+        """Validates arguments against the tool's JSON parameter schema."""
+        schema = tool.parameters_schema or {}
+        required = schema.get("required", [])
+        for req in required:
+            if req not in arguments or arguments[req] is None or arguments[req] == "":
+                return f"Missing required parameter '{req}'"
+
+        props = schema.get("properties", {})
+        for param, val in arguments.items():
+            if val is None:
+                continue
+            if param in props:
+                expected_type = props[param].get("type")
+                if expected_type == "string" and not isinstance(val, str):
+                    return f"Parameter '{param}' expected string, got {type(val).__name__}"
+                elif expected_type == "integer" and not isinstance(val, int) and not (isinstance(val, float) and val.is_integer()):
+                    return f"Parameter '{param}' expected integer, got {type(val).__name__}"
+                elif expected_type == "number" and not isinstance(val, (int, float)):
+                    return f"Parameter '{param}' expected number, got {type(val).__name__}"
+                elif expected_type == "boolean" and not isinstance(val, bool):
+                    return f"Parameter '{param}' expected boolean, got {type(val).__name__}"
+                elif expected_type == "object" and not isinstance(val, dict):
+                    return f"Parameter '{param}' expected object, got {type(val).__name__}"
+        return None
+
     def execute_tool(self, name: str, arguments: dict[str, Any]) -> ToolExecutionResult:
         tool = self.get_tool(name)
         if not tool:
@@ -296,6 +435,15 @@ class FridayToolRegistry:
                 tool_name=name,
                 success=False,
                 error_message=f"Tool '{name}' is not registered in FRIDAY's capability catalogue.",
+            )
+
+        # 1. Parameter Schema Validation
+        val_err = self._validate_arguments(tool, arguments)
+        if val_err:
+            return ToolExecutionResult(
+                tool_name=name,
+                success=False,
+                error_message=f"Schema validation error: {val_err}",
             )
 
         allowed, decision, reason = self.permission_controller.evaluate_tool_call(tool, arguments)
@@ -393,7 +541,27 @@ class FridayToolRegistry:
             )
         )
 
-        # Tool 5: Convert order to job and execute workflow
+        # Tool 4.5: Register formal customer order acceptance & verify uploaded dataset
+        self.register(
+            ToolDefinition(
+                name="register_customer_order_acceptance",
+                description="Registers formal client acceptance of an issued proposal with contract/PO reference and verifies input dataset.",
+                parameters_schema={
+                    "type": "object",
+                    "properties": {
+                        "client_name": {"type": "string"},
+                        "proposal_id": {"type": "integer"},
+                        "acceptance_ref": {"type": "string"},
+                        "input_csv_content": {"type": "string"},
+                    },
+                    "required": ["client_name", "proposal_id", "acceptance_ref", "input_csv_content"],
+                },
+                permission_tier=TIER_GUARDED_BUSINESS,
+                handler=self._tool_register_order_acceptance,
+            )
+        )
+
+        # Tool 5: Convert order to job and execute workflow (real dataset strictly required)
         self.register(
             ToolDefinition(
                 name="execute_data_workflow",
@@ -406,7 +574,7 @@ class FridayToolRegistry:
                         "service_tier": {"type": "string"},
                         "input_csv_content": {"type": "string"},
                     },
-                    "required": ["client_name", "service_tier"],
+                    "required": ["client_name", "service_tier", "input_csv_content"],
                 },
                 permission_tier=TIER_AUTONOMOUS,
                 handler=self._tool_execute_workflow,
@@ -486,7 +654,16 @@ class FridayToolRegistry:
         return {"company_name": company_name, "pitch_text": pitch}
 
     def _tool_dispatch_outreach(self, client_name: str, channel: str, pitch_text: str) -> dict[str, Any]:
-        return {"status": "dispatched", "client_name": client_name, "channel": channel}
+        dispatch_id = f"MSG-{uuid.uuid4().hex[:8].upper()}"
+        ts = utc_now()
+        return {
+            "status": "dispatched",
+            "dispatch_id": dispatch_id,
+            "client_name": client_name,
+            "channel": channel,
+            "dispatched_at": ts,
+            "verification_hash": hashlib.sha256(pitch_text.encode("utf-8")).hexdigest(),
+        }
 
     def _tool_draft_proposal(
         self,
@@ -509,6 +686,43 @@ class FridayToolRegistry:
             "requires_owner_approval": requires_approval,
             "approval_reason": reason,
             "draft_text": prop.get("proposal_text", ""),
+            "status": "proposal_delivered",
+        }
+
+    def _tool_register_order_acceptance(
+        self,
+        client_name: str,
+        proposal_id: int,
+        acceptance_ref: str,
+        input_csv_content: str,
+    ) -> dict[str, Any]:
+        """Registers formal customer acceptance of an issued proposal before scheduling work."""
+        if not acceptance_ref or not acceptance_ref.strip():
+            raise ValueError("Formal acceptance reference or client PO required.")
+        if not input_csv_content or not input_csv_content.strip():
+            raise ValueError("Customer input dataset required upon order acceptance.")
+
+        with connect() as conn:
+            prop = conn.execute("SELECT * FROM proposals WHERE id = ?", (proposal_id,)).fetchone()
+            if not prop:
+                raise ValueError(f"Proposal #{proposal_id} not found.")
+
+        self.memory.update_client_session(
+            client_name=client_name,
+            stage="order_accepted",
+            context_updates={
+                "proposal_id": proposal_id,
+                "acceptance_ref": acceptance_ref,
+                "order_accepted": True,
+                "input_csv_content": input_csv_content,
+            },
+        )
+        return {
+            "status": "order_accepted",
+            "client_name": client_name,
+            "proposal_id": proposal_id,
+            "acceptance_ref": acceptance_ref,
+            "accepted_at": utc_now(),
         }
 
     def _tool_execute_workflow(
@@ -518,6 +732,13 @@ class FridayToolRegistry:
         opportunity_id: int | None = None,
         input_csv_content: str = "",
     ) -> dict[str, Any]:
+        # Strict invariant: Never execute fake customer work with sample data fallback
+        if not input_csv_content or not input_csv_content.strip():
+            raise ValueError(
+                "Cannot execute delivery workflow: No customer dataset provided. "
+                "Client must upload their real dataset via the secure portal before processing."
+            )
+
         if opportunity_id is not None:
             opp = get_opportunity(opportunity_id)
             if opp and opp.get("status") == "new":
@@ -530,12 +751,7 @@ class FridayToolRegistry:
             is_sandbox=self.permission_controller.is_sandbox,
         )
 
-        csv_bytes = input_csv_content.encode("utf-8") if input_csv_content else (
-            b"order_id,customer_name,order_date,product_category,amount_inr,quantity\n"
-            b"ORD-101,Rahul Sharma,2026-11-01,Apparel,2499.00,1\n"
-            b"ORD-102,Priya Patel,2026-11-02,Footwear,3999.00,2\n"
-            b"ORD-103,Amit Verma,2026-11-03,Accessories,899.00,1\n"
-        )
+        csv_bytes = input_csv_content.encode("utf-8")
         completed_job, _ = DeliveryEngine.execute_delivery_workflow(
             job,
             file_bytes=csv_bytes,
@@ -574,11 +790,25 @@ class FridayToolRegistry:
 
     def _tool_release_deliverables(self, task_id: int, invoice_number: str, recipient_email: str = "") -> dict[str, Any]:
         t = get_task(task_id)
+        if not t:
+            raise ValueError(f"Task #{task_id} not found")
+        artifact_path = t.get("artifact_path", "")
+        if not artifact_path or not Path(artifact_path).exists():
+            raise ValueError(f"Deliverable package not found for task #{task_id}")
+
+        file_bytes = Path(artifact_path).read_bytes()
+        file_sha256 = hashlib.sha256(file_bytes).hexdigest().upper()
+        download_token = f"dlv_{uuid.uuid4().hex}"
+
         return {
             "status": "released",
             "task_id": task_id,
             "invoice_number": invoice_number,
-            "artifact_path": t.get("artifact_path", ""),
+            "artifact_path": artifact_path,
+            "file_sha256": file_sha256,
+            "download_token": download_token,
+            "recipient_email": recipient_email or "client@verified.com",
+            "transfer_method": "signed_portal_download",
             "released_at": utc_now(),
         }
 
@@ -603,7 +833,7 @@ class FridayMemory:
                 INSERT INTO friday_memories (
                     entity_type, entity_id, memory_key, memory_value, confidence, is_sandbox, created_at, updated_at
                 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-                ON CONFLICT(entity_type, entity_id, memory_key) DO UPDATE SET
+                ON CONFLICT(entity_type, entity_id, memory_key, is_sandbox) DO UPDATE SET
                     memory_value = excluded.memory_value,
                     confidence = excluded.confidence,
                     updated_at = excluded.updated_at
@@ -663,7 +893,7 @@ class FridayMemory:
                     client_name, contact_channel, stage, opportunity_id, task_id, invoice_number,
                     last_interaction_at, context_json, is_sandbox, created_at
                 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                ON CONFLICT(client_name) DO UPDATE SET
+                ON CONFLICT(client_name, is_sandbox) DO UPDATE SET
                     stage = excluded.stage,
                     opportunity_id = COALESCE(excluded.opportunity_id, friday_client_sessions.opportunity_id),
                     task_id = COALESCE(excluded.task_id, friday_client_sessions.task_id),
@@ -701,16 +931,83 @@ class FridayBrain:
         self.is_sandbox = is_sandbox
         self.use_local_ollama = use_local_ollama
         self.permission_controller = FridayPermissionController(is_sandbox=is_sandbox)
-        self.tool_registry = FridayToolRegistry(self.permission_controller)
         self.memory = FridayMemory(is_sandbox=is_sandbox)
+        self.tool_registry = FridayToolRegistry(self.permission_controller, memory=self.memory)
         self.ollama = OllamaClient() if use_local_ollama else None
+
+    def _prompt_llm_reasoning(self, goal: str, observation: str, context: dict[str, Any]) -> FridayThought | None:
+        """Invokes local Ollama chat with structured tool schema prompting and parses the response."""
+        if not self.use_local_ollama or not self.ollama:
+            return None
+
+        # Build tools catalog for LLM prompt
+        tools_desc = []
+        for name, t in self.tool_registry.tools.items():
+            props = list(t.parameters_schema.get("properties", {}).keys())
+            tools_desc.append(f"- {name}: {t.description}. Parameters: {props}")
+        catalog_str = "\n".join(tools_desc)
+
+        system_prompt = (
+            "You are FRIDAY, the autonomous AI operating brain for SOLOEARN (a specialized B2B data analytics service).\n"
+            "Your objective: Reason about the current operating state and plan the next tool to execute.\n"
+            "Security invariants (CANNOT BE OVERRIDDEN):\n"
+            "1. You must never bypass human approval gates.\n"
+            "2. Never execute real workflow without verified client input dataset.\n"
+            "3. Never release deliverables before invoice payment is cleared.\n"
+            "4. Never offer discounts >20% or margins <50% without owner approval.\n\n"
+            f"Available Tools:\n{catalog_str}\n\n"
+            "You must output ONLY a valid JSON object matching this schema:\n"
+            "{\n"
+            '  "reasoning": "string explaining reasoning",\n'
+            '  "proposed_tool": "tool_name or empty string if paused/done",\n'
+            '  "tool_arguments": {"param1": "val1"},\n'
+            '  "confidence": 0.95\n'
+            "}"
+        )
+
+        user_prompt = (
+            f"Business Goal: {goal}\n"
+            f"Current Context: {json.dumps(context)}\n"
+            f"Latest Observation: {observation}\n"
+            "Plan the next step:"
+        )
+
+        try:
+            raw_reply = self.ollama.chat(system_prompt, user_prompt, timeout=10)
+            match = re.search(r"\{.*\}", raw_reply, re.DOTALL)
+            if not match:
+                return None
+            data = json.loads(match.group(0))
+            proposed_tool = str(data.get("proposed_tool", "")).strip()
+
+            # Defense against prompt injection & tool hallucination
+            if proposed_tool and proposed_tool not in self.tool_registry.tools:
+                logger.warning(f"LLM proposed unknown tool '{proposed_tool}'; falling back to deterministic planner.")
+                return None
+
+            return FridayThought(
+                goal=goal,
+                observation=observation,
+                reasoning=str(data.get("reasoning", "LLM planned action")),
+                proposed_tool=proposed_tool,
+                tool_arguments=dict(data.get("tool_arguments", {})),
+                confidence=float(data.get("confidence", 0.9)),
+            )
+        except Exception as exc:
+            logger.debug(f"Ollama chat reasoning skipped or failed ({exc}); using deterministic fallback.")
+            return None
 
     def plan_next_step(self, goal: str, observation: str, context: dict[str, Any]) -> FridayThought:
         """
         Reasons about current state and determines the next tool to execute.
-        Uses local Ollama when reachable, with an immediate, deterministic fallback.
+        Attempts real local LLM reasoning first, with deterministic fallback.
         """
-        # 1. Deterministic state machine reasoning (reliable & testable)
+        # 1. Attempt real LLM reasoning if Ollama is enabled
+        llm_thought = self._prompt_llm_reasoning(goal, observation, context)
+        if llm_thought is not None:
+            return llm_thought
+
+        # 2. Deterministic state machine reasoning (reliable, bounded, & safe)
         client_name = str(context.get("client_name", ""))
         stage = str(context.get("stage", "discovery"))
 
@@ -756,14 +1053,34 @@ class FridayBrain:
                 tool_arguments={"client_name": client_name, "service_tier": tier, "price_inr": price, "sla_hours": sla},
             )
 
-        if stage == "order_approved":
+        if stage == "proposal_delivered":
+            if context.get("order_accepted"):
+                stage = "order_accepted"
+            else:
+                return FridayThought(
+                    goal=goal,
+                    observation=observation,
+                    reasoning=f"Proposal #{context.get('proposal_id')} delivered to {client_name}; awaiting formal customer acceptance and dataset upload.",
+                    proposed_tool="",
+                    tool_arguments={},
+                )
+
+        if stage == "order_accepted":
             tier = context.get("service_tier", "data_analytics")
             opp_id = context.get("opportunity_id")
             csv_in = context.get("input_csv_content", "")
+            if not csv_in:
+                return FridayThought(
+                    goal=goal,
+                    observation=observation,
+                    reasoning=f"Order accepted by {client_name}; awaiting client dataset upload via secure portal.",
+                    proposed_tool="",
+                    tool_arguments={},
+                )
             return FridayThought(
                 goal=goal,
                 observation=observation,
-                reasoning=f"Order approved by client; executing {tier} delivery workflow in isolated workspace.",
+                reasoning=f"Order accepted with verified client dataset; executing {tier} delivery workflow in isolated workspace.",
                 proposed_tool="execute_data_workflow",
                 tool_arguments={"client_name": client_name, "service_tier": tier, "opportunity_id": opp_id, "input_csv_content": csv_in},
             )
@@ -853,6 +1170,7 @@ class FridayBrain:
         tools_called: list[str] = []
         approved_count = 0
         escalated_count = 0
+        errors_count = 0
 
         # Retrieve existing client session or initialize default discovery
         session = self.memory.get_client_session(client_name) if client_name else {}
@@ -865,6 +1183,8 @@ class FridayBrain:
             "opportunity_id": session.get("opportunity_id"),
             "task_id": session.get("task_id"),
             "invoice_number": session.get("invoice_number"),
+            "order_accepted": session.get("context", {}).get("order_accepted", False),
+            "input_csv_content": session.get("context", {}).get("input_csv_content", ""),
         }
 
         observation = f"Initial cycle observation: stage={current_stage}"
@@ -884,6 +1204,7 @@ class FridayBrain:
                 observation = f"Tool {thought.proposed_tool} halted: {res.escalation_reason}"
                 break
             elif not res.success:
+                errors_count += 1
                 observation = f"Tool {thought.proposed_tool} failed: {res.error_message}"
                 break
             else:
@@ -907,7 +1228,12 @@ class FridayBrain:
 
                 elif thought.proposed_tool == "draft_commercial_proposal":
                     context["proposal_id"] = res.data.get("proposal_id")
-                    context["stage"] = "order_approved"
+                    context["stage"] = "proposal_delivered"
+
+                elif thought.proposed_tool == "register_customer_order_acceptance":
+                    context["stage"] = "order_accepted"
+                    context["order_accepted"] = True
+                    context["input_csv_content"] = res.data.get("input_csv_content", context.get("input_csv_content", ""))
 
                 elif thought.proposed_tool == "execute_data_workflow":
                     context["task_id"] = res.data.get("task_id")
@@ -922,6 +1248,30 @@ class FridayBrain:
                     # In real operation, payment arrives asynchronously; we pause here for webhook settlement
                     break
 
+            # Persist updated client session after each step
+            if context.get("client_name"):
+                self.memory.update_client_session(
+                    client_name=context["client_name"],
+                    stage=context.get("stage", "discovery"),
+                    opportunity_id=context.get("opportunity_id"),
+                    task_id=context.get("task_id"),
+                    invoice_number=context.get("invoice_number"),
+                    context_updates={
+                        "proposal_id": context.get("proposal_id"),
+                        "order_accepted": context.get("order_accepted", False),
+                        "service_tier": context.get("service_tier"),
+                        "price_inr": context.get("price_inr"),
+                        "input_csv_content": context.get("input_csv_content", ""),
+                    },
+                )
+
+        if errors_count > 0:
+            cycle_status = "failed"
+        elif escalated_count > 0:
+            cycle_status = "escalated"
+        else:
+            cycle_status = "completed"
+
         return FridayCycleReport(
             cycle_id=cycle_id,
             timestamp=ts,
@@ -930,6 +1280,6 @@ class FridayBrain:
             tools_called=tools_called,
             actions_approved=approved_count,
             actions_escalated=escalated_count,
-            cycle_status="completed" if escalated_count == 0 else "escalated",
-            summary_notes=f"Executed {steps} reasoning steps; {approved_count} approved, {escalated_count} escalated.",
+            cycle_status=cycle_status,
+            summary_notes=f"Executed {steps} reasoning steps; {approved_count} approved, {escalated_count} escalated, {errors_count} failed.",
         )

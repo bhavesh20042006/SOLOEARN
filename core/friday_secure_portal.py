@@ -12,8 +12,10 @@ Security Architecture:
 - HMAC-SHA256 signed payment webhook validation with idempotency tables.
 """
 
+import csv
 import hashlib
 import hmac
+import io
 import json
 import logging
 import os
@@ -21,6 +23,7 @@ import re
 import time
 import uuid
 from dataclasses import asdict, dataclass
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -91,10 +94,11 @@ class FridaySecurePortal:
         task_id: int | None = None,
         validity_hours: int = 72,
     ) -> str:
-        """Generates a secure, cryptographically random upload token."""
+        """Generates a secure, cryptographically random upload token with genuine expiration."""
         token = f"tok_{uuid.uuid4().hex}"
-        now = utc_now()
-        expires = utc_now()  # placeholder; in real use, compute future ISO timestamp
+        now_dt = datetime.now(timezone.utc)
+        now = now_dt.isoformat()
+        expires = (now_dt + timedelta(hours=validity_hours)).isoformat()
 
         with connect() as conn:
             conn.execute(
@@ -115,7 +119,8 @@ class FridaySecurePortal:
         file_bytes: bytes,
     ) -> dict[str, Any]:
         """
-        Validates uploaded file against security criteria and stores it in the client's isolated workspace.
+        Validates uploaded file against security criteria, enforces expiration and single-use,
+        and stores it in the client's isolated workspace.
         """
         if not token:
             raise ValueError("Authentication token required for portal upload")
@@ -127,6 +132,10 @@ class FridaySecurePortal:
             ).fetchone()
             if not token_row:
                 raise ValueError("Invalid or unrecognized client upload token")
+            if bool(token_row["is_used"]):
+                raise ValueError(f"Upload token '{token}' has already been used. Each portal token is strictly single-use.")
+            if token_row["expires_at"] < utc_now():
+                raise ValueError(f"Upload token '{token}' expired at {token_row['expires_at']}. Please request a fresh link.")
 
         # 1. Size constraint
         if len(file_bytes) == 0:
@@ -153,19 +162,21 @@ class FridaySecurePortal:
         dest_path = ws_path / clean_name
 
         # 5. Content Sanitization for CSV/Text files against Formula Injection
+        # Uses python's csv library to preserve embedded commas, quotes, and legitimate negative numbers
         if ext in {".csv", ".tsv", ".txt"}:
             try:
                 decoded_text = file_bytes.decode("utf-8")
             except UnicodeDecodeError:
                 decoded_text = file_bytes.decode("latin-1", errors="replace")
 
-            # Sanitize leading formula injection characters
-            sanitized_lines = []
-            for line in decoded_text.splitlines():
-                cells = line.split(",")
-                clean_cells = [sanitize_cell_value(c.strip()) for c in cells]
-                sanitized_lines.append(",".join(clean_cells))
-            dest_path.write_text("\n".join(sanitized_lines), encoding="utf-8")
+            delimiter = "\t" if ext == ".tsv" else ","
+            reader = csv.reader(io.StringIO(decoded_text), delimiter=delimiter)
+            out_str = io.StringIO()
+            writer = csv.writer(out_str, delimiter=delimiter, lineterminator="\n")
+            for row in reader:
+                clean_row = [sanitize_cell_value(c) for c in row]
+                writer.writerow(clean_row)
+            dest_path.write_text(out_str.getvalue(), encoding="utf-8")
         else:
             dest_path.write_bytes(file_bytes)
 
@@ -199,10 +210,19 @@ class FridayPaymentWebhookHandler:
     and triggers automatic deliverable release in FRIDAY.
     """
 
-    def __init__(self, webhook_secret: str = "whsec_test_secret_soloearn_2026", is_sandbox: bool = False):
-        self.webhook_secret = webhook_secret
+    DEFAULT_TEST_SECRET = "whsec_test_secret_soloearn_2026"
+
+    def __init__(self, webhook_secret: str | None = None, is_sandbox: bool = False):
         self.is_sandbox = is_sandbox
         init_portal_tables()
+        if not is_sandbox:
+            if not webhook_secret or webhook_secret == self.DEFAULT_TEST_SECRET or len(webhook_secret) < 32:
+                raise ValueError(
+                    "Production payment webhook handler requires a strong, non-default webhook secret (at least 32 characters)."
+                )
+            self.webhook_secret = webhook_secret
+        else:
+            self.webhook_secret = webhook_secret or self.DEFAULT_TEST_SECRET
 
     def verify_hmac_signature(self, payload_bytes: bytes, signature: str) -> bool:
         if not self.webhook_secret or not signature:
@@ -217,7 +237,7 @@ class FridayPaymentWebhookHandler:
         signature: str,
         provider: str = "simulated_bank",
     ) -> dict[str, Any]:
-        """Processes an incoming payment webhook event with strict signature and idempotency verification."""
+        """Processes an incoming payment webhook event with strict signature, amount, and idempotency verification."""
         # 1. Verify HMAC Signature
         if not self.verify_hmac_signature(payload_bytes, signature):
             raise ValueError("Invalid webhook HMAC signature: event rejected for security.")
@@ -255,6 +275,33 @@ class FridayPaymentWebhookHandler:
                 raise ValueError(f"Invoice '{inv_num}' not found for webhook settlement")
 
             total_inv = float(inv["amount_total"])
+
+            # Invariant: Prevent reusing bank transaction reference (UTR)
+            existing_txn = conn.execute(
+                "SELECT id, reference_id FROM financial_transactions WHERE description LIKE ? AND is_reversal = 0",
+                (f"%Ref: {txn_ref}%",),
+            ).fetchone()
+            if existing_txn:
+                raise ValueError(
+                    f"Duplicate transaction reference: Bank reference '{txn_ref}' has already been processed in transaction #{existing_txn['id']}."
+                )
+
+            # Invariant: Reject payment amount mismatch (exact match required)
+            if abs(amt - total_inv) > 0.01:
+                raise ValueError(
+                    f"Payment amount mismatch: Webhook received ₹{amt:,.2f}, but invoice total is ₹{total_inv:,.2f} for {inv_num}. Exact match required."
+                )
+
+            if inv["status"] == "paid":
+                return {
+                    "event_id": event_id,
+                    "status": "already_settled",
+                    "invoice_number": inv_num,
+                    "amount_inr": amt,
+                    "transaction_ref": txn_ref,
+                    "note": f"Invoice {inv_num} is already fully settled.",
+                }
+
             conn.execute(
                 """
                 UPDATE invoices 
@@ -263,6 +310,11 @@ class FridayPaymentWebhookHandler:
                 """,
                 (amt, now, txn_ref, inv_num),
             )
+
+            # If full settlement, update linked opportunity to paid
+            opp_id = inv["opportunity_id"]
+            if opp_id:
+                conn.execute("UPDATE opportunities SET status = 'paid' WHERE id = ?", (opp_id,))
 
             # Record client receipt in financial_transactions
             conn.execute(
