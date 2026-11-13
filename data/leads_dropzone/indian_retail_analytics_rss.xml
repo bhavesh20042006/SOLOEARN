@@ -1,0 +1,26 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<rss version="2.0">
+<channel>
+  <title>Indian Retail &amp; D2C Analytics Exchange</title>
+  <link>https://retail-exchange.in/analytics-feed</link>
+  <description>Verified inbound commercial requirements for data cleaning, financial models, and automated reporting</description>
+  <item>
+    <title>Omnichannel POS and E-commerce CSV Data Cleaning &amp; Excel Model</title>
+    <link>https://retail-exchange.in/jobs/omnichannel-pos-csv-cleaning</link>
+    <description>Looking for an analytics specialist to clean weekly retail store POS CSVs and online store order data. Remove duplicate rows, handle missing customer IDs, generate monthly sales trend charts, and format a professional multi-tab Excel workbook. Cleaned CSV and summary presentation required. Budget: ₹5,000 for 2 hours.</description>
+    <pubDate>Thu, 12 Nov 2026 14:00:00 GMT</pubDate>
+  </item>
+  <item>
+    <title>Marketplace Fees vs Bank Settlement Discrepancy Reconciliation</title>
+    <link>https://retail-exchange.in/jobs/marketplace-fees-reconciliation</link>
+    <description>Need automated reconciliation for Amazon and Flipkart commission fees vs actual bank credit statement rows. Deduplicate transaction IDs, identify overcharged commission rates, and provide an automated Python script with test suite and reconciled CSV. Budget: ₹10,000 for 3 hours.</description>
+    <pubDate>Thu, 12 Nov 2026 15:30:00 GMT</pubDate>
+  </item>
+  <item>
+    <title>Customer Retention &amp; Repeat Purchase Executive HTML Dashboard</title>
+    <link>https://retail-exchange.in/jobs/customer-retention-dashboard</link>
+    <description>We need an offline HTML5 interactive dashboard for our founder review. Takes raw customer transaction CSV and provides interactive KPI cards, cohort distribution visuals, and searchable product tables with zero external cloud dependencies. Budget: ₹20,000 for 6 hours.</description>
+    <pubDate>Thu, 12 Nov 2026 17:15:00 GMT</pubDate>
+  </item>
+</channel>
+</rss>

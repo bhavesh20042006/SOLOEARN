@@ -1,0 +1,20 @@
+[run]
+source = core
+branch = true
+omit =
+    tests/*
+    venv/*
+    */__pycache__/*
+    */site-packages/*
+
+[report]
+show_missing = true
+fail_under = 70
+exclude_lines =
+    pragma: no cover
+    if __name__ == .__main__.
+    if TYPE_CHECKING:
+    raise NotImplementedError
+
+[html]
+directory = htmlcov

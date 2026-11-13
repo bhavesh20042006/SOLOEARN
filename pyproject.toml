@@ -1,0 +1,81 @@
+[build-system]
+requires = ["setuptools>=68.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "soloearn"
+version = "0.1.0"
+description = "Autonomous AI-powered B2B data analytics service"
+requires-python = ">=3.12"
+license = {text = "MIT"}
+readme = "README.md"
+authors = [{name = "Bhavesh Khullar"}]
+keywords = ["data-analytics", "automation", "b2b", "ai-agent", "upi"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: End Users/Desktop",
+    "Programming Language :: Python :: 3",
+    "Topic :: Office/Business :: Financial",
+    "Topic :: Scientific/Engineering :: Information Analysis",
+]
+
+dependencies = [
+    "streamlit>=1.42,<2",
+    "pandas>=2.2,<4",
+    "matplotlib>=3.9,<4",
+    "openpyxl>=3.1,<4",
+    "requests>=2.32,<3",
+    "python-dotenv>=1.0,<2",
+    "qrcode>=8.0,<9",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+    "pytest-cov>=5.0",
+    "mypy>=1.11",
+    "ruff>=0.5",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-v --tb=short"
+
+[tool.coverage.run]
+source = ["core"]
+branch = true
+omit = [
+    "tests/*",
+    "venv/*",
+    "*/__pycache__/*",
+]
+
+[tool.coverage.report]
+show_missing = true
+fail_under = 70
+exclude_lines = [
+    "pragma: no cover",
+    "if __name__ == .__main__.",
+    "if TYPE_CHECKING:",
+]
+
+[tool.mypy]
+strict = false
+warn_return_any = true
+warn_unused_configs = true
+ignore_missing_imports = true
+
+[tool.ruff]
+line-length = 120
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "UP", "S", "B"]
+ignore = [
+    "S101",   # assert usage OK in tests
+    "S603",   # subprocess calls OK
+    "E501",   # line length handled by formatter
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = ["S101", "S106"]

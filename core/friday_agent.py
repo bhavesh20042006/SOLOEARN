@@ -24,6 +24,7 @@ import logging
 import math
 import os
 import re
+import secrets
 import time
 import uuid
 from dataclasses import asdict, dataclass, field
@@ -50,6 +51,12 @@ from core.commercial_funnel import add_commercial_lead, list_commercial_leads
 from core.config import DATA_DIR, WORKSPACES_DIR, safe_workspace_path
 from core.db import connect, get_opportunity, get_task, update_opportunity_status, update_task_status, utc_now
 from core.llm import OllamaClient
+from core.secrets_manager import (
+    constant_time_compare,
+    mask_secret,
+    redact_secrets_from_text,
+    redact_sensitive_dict,
+)
 from core.upi_engine import SimulatedBankMerchantAdapter, process_merchant_bank_webhook
 
 logger = logging.getLogger("soloearn.friday")
@@ -185,7 +192,7 @@ def init_friday_tables() -> None:
                 status TEXT NOT NULL DEFAULT 'accepted', -- 'accepted', 'in_delivery', 'completed'
                 is_sandbox INTEGER NOT NULL DEFAULT 0,
                 accepted_at TEXT NOT NULL,
-                FOREIGN KEY(proposal_id) REFERENCES proposals(id)
+                FOREIGN KEY(proposal_id) REFERENCES proposals(id) ON DELETE CASCADE
             );
             """
         )
@@ -210,10 +217,71 @@ def init_friday_tables() -> None:
                 created_at TEXT NOT NULL,
                 is_sandbox INTEGER NOT NULL DEFAULT 0,
                 UNIQUE(token, is_sandbox),
-                FOREIGN KEY(task_id) REFERENCES tasks(id)
+                FOREIGN KEY(task_id) REFERENCES tasks(id) ON DELETE CASCADE
             );
             """
         )
+
+        # Ensure foreign keys cascade deletes for existing databases
+        fk_orders = [dict(r) for r in conn.execute("PRAGMA foreign_key_list(friday_accepted_orders)").fetchall()]
+        if fk_orders and any(f["table"] == "proposals" and f.get("on_delete") != "CASCADE" for f in fk_orders):
+            conn.execute("PRAGMA foreign_keys = OFF")
+            conn.execute("ALTER TABLE friday_accepted_orders RENAME TO _friday_accepted_orders_old")
+            conn.execute(
+                """
+                CREATE TABLE friday_accepted_orders (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    client_name TEXT NOT NULL,
+                    proposal_id INTEGER NOT NULL,
+                    opportunity_id INTEGER,
+                    service_tier TEXT NOT NULL,
+                    agreed_price_inr REAL NOT NULL,
+                    acceptance_ref TEXT NOT NULL,
+                    dataset_sha256 TEXT NOT NULL,
+                    dataset_bytes INTEGER NOT NULL,
+                    status TEXT NOT NULL DEFAULT 'accepted',
+                    is_sandbox INTEGER NOT NULL DEFAULT 0,
+                    accepted_at TEXT NOT NULL,
+                    FOREIGN KEY(proposal_id) REFERENCES proposals(id) ON DELETE CASCADE
+                );
+                """
+            )
+            conn.execute("INSERT INTO friday_accepted_orders SELECT * FROM _friday_accepted_orders_old")
+            conn.execute("DROP TABLE _friday_accepted_orders_old")
+            conn.execute("PRAGMA foreign_keys = ON")
+
+        fk_tokens = [dict(r) for r in conn.execute("PRAGMA foreign_key_list(friday_deliverable_tokens)").fetchall()]
+        if fk_tokens and any(f["table"] == "tasks" and f.get("on_delete") != "CASCADE" for f in fk_tokens):
+            conn.execute("PRAGMA foreign_keys = OFF")
+            conn.execute("ALTER TABLE friday_deliverable_tokens RENAME TO _friday_deliverable_tokens_old")
+            conn.execute(
+                """
+                CREATE TABLE friday_deliverable_tokens (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    token TEXT NOT NULL,
+                    token_hash TEXT NOT NULL,
+                    task_id INTEGER NOT NULL,
+                    opportunity_id INTEGER,
+                    invoice_number TEXT NOT NULL,
+                    client_name TEXT NOT NULL,
+                    artifact_path TEXT NOT NULL,
+                    file_sha256 TEXT NOT NULL,
+                    file_size_bytes INTEGER NOT NULL,
+                    is_downloaded INTEGER NOT NULL DEFAULT 0,
+                    download_count INTEGER NOT NULL DEFAULT 0,
+                    max_downloads INTEGER NOT NULL DEFAULT 1,
+                    expires_at TEXT NOT NULL,
+                    downloaded_at TEXT,
+                    created_at TEXT NOT NULL,
+                    is_sandbox INTEGER NOT NULL DEFAULT 0,
+                    UNIQUE(token, is_sandbox),
+                    FOREIGN KEY(task_id) REFERENCES tasks(id) ON DELETE CASCADE
+                );
+                """
+            )
+            conn.execute("INSERT INTO friday_deliverable_tokens SELECT * FROM _friday_deliverable_tokens_old")
+            conn.execute("DROP TABLE _friday_deliverable_tokens_old")
+            conn.execute("PRAGMA foreign_keys = ON")
         conn.execute(
             """
             CREATE TABLE IF NOT EXISTS friday_delivery_events (
@@ -247,6 +315,43 @@ def init_friday_tables() -> None:
                 is_sandbox INTEGER NOT NULL DEFAULT 0,
                 created_at TEXT NOT NULL
             );
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS friday_episodes (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                episode_type TEXT NOT NULL,         -- 'client_delivery', 'negotiation', 'qa_incident', 'cycle_run'
+                entity_id TEXT NOT NULL,           -- client_name, service_tier, cycle_id
+                summary TEXT NOT NULL,
+                key_learnings TEXT NOT NULL DEFAULT '[]', -- JSON list of strings
+                outcome TEXT NOT NULL,             -- 'success', 'escalated', 'failed', 'settled'
+                metadata_json TEXT NOT NULL DEFAULT '{}',
+                is_sandbox INTEGER NOT NULL DEFAULT 0,
+                created_at TEXT NOT NULL
+            );
+            """
+        )
+        conn.execute(
+            """
+            CREATE TRIGGER IF NOT EXISTS trg_friday_episodes_no_update
+            BEFORE UPDATE ON friday_episodes
+            FOR EACH ROW
+            WHEN OLD.is_sandbox = 0
+            BEGIN
+                SELECT RAISE(ABORT, 'friday_episodes is an append-only audit trail for production records: modifications are prohibited.');
+            END;
+            """
+        )
+        conn.execute(
+            """
+            CREATE TRIGGER IF NOT EXISTS trg_friday_episodes_no_delete
+            BEFORE DELETE ON friday_episodes
+            FOR EACH ROW
+            WHEN OLD.is_sandbox = 0
+            BEGIN
+                SELECT RAISE(ABORT, 'friday_episodes is an append-only audit trail for production records: deletions are prohibited.');
+            END;
             """
         )
         conn.commit()
@@ -286,6 +391,19 @@ class FridayThought:
 
 
 @dataclass
+class ReActStep:
+    step_number: int
+    thought: str
+    action_tool: str
+    action_args: dict[str, Any]
+    observation: str
+    is_success: bool
+    error_message: str = ""
+    escalation_reason: str = ""
+    timestamp: str = ""
+
+
+@dataclass
 class FridayCycleReport:
     cycle_id: str
     timestamp: str
@@ -296,6 +414,8 @@ class FridayCycleReport:
     actions_escalated: int
     cycle_status: str
     summary_notes: str
+    react_trace: list[dict[str, Any]] = field(default_factory=list)
+    fallback_reasons: list[str] = field(default_factory=list)
 
 
 # ===========================================================================
@@ -311,6 +431,11 @@ class FridayPermissionController:
     def __init__(self, is_sandbox: bool = False):
         self.is_sandbox = is_sandbox
         self.escalation_queue: list[dict[str, Any]] = []
+
+    def is_autonomous_outreach_enabled(self) -> bool:
+        """Checks if owner has explicitly enabled autonomous outreach in configuration."""
+        val = os.environ.get("SOLOEARN_AUTONOMOUS_OUTREACH", "false").strip().lower()
+        return val in ("true", "1", "yes", "enabled")
 
     def is_escalation_approved(self, tool_name: str, arguments: dict[str, Any], consume: bool = True) -> bool:
         """
@@ -338,10 +463,13 @@ class FridayPermissionController:
                 return False
 
             if consume:
-                conn.execute(
-                    "UPDATE friday_escalations SET is_consumed = 1, consumed_at = ?, status = 'consumed' WHERE id = ?",
+                cur = conn.execute(
+                    "UPDATE friday_escalations SET is_consumed = 1, consumed_at = ?, status = 'consumed' WHERE id = ? AND is_consumed = 0",
                     (now, row["id"]),
                 )
+                if cur.rowcount == 0:
+                    conn.rollback()
+                    return False
             conn.commit()
             return True
 
@@ -474,8 +602,17 @@ class FridayPermissionController:
                     self.record_escalation(tool.name, arguments, reason)
                     return False, "escalated_owner", reason
 
-            # Invariant 2: Outbound Communication Gating (Gate 1)
+            # Invariant 2: Outbound Communication Gating (Gate 1 / Gate 4)
             if tool.name == "dispatch_outreach_pitch":
+                if self.is_autonomous_outreach_enabled():
+                    from core.outreach_dispatcher import get_outreach_rate_limit_status
+                    can_send, count_today, remaining = get_outreach_rate_limit_status(is_sandbox=self.is_sandbox)
+                    if can_send:
+                        return True, "approved_auto", f"Autonomous outreach authorized under owner policy ({remaining} sends remaining today)."
+                    reason = f"Autonomous outreach daily rate limit reached ({count_today} sent today). Halted for anti-spam protection."
+                    self.record_escalation(tool.name, arguments, reason)
+                    return False, "escalated_owner", reason
+
                 reason = "Outreach pitch drafted successfully; requires owner review before external dispatch (Gate 1)"
                 self._escalate("gate_1_outreach", reason, f"Client: {arguments.get('client_name')}")
                 self.record_escalation(tool.name, arguments, reason)
@@ -659,11 +796,12 @@ class FridayToolRegistry:
                 data=result_data,
             )
         except Exception as e:
-            logger.exception(f"Tool {name} failed execution: {e}")
+            safe_err = redact_secrets_from_text(str(e))
+            logger.exception(f"Tool {name} failed execution: {safe_err}")
             return ToolExecutionResult(
                 tool_name=name,
                 success=False,
-                error_message=str(e),
+                error_message=safe_err,
             )
 
     def _register_default_tools(self) -> None:
@@ -848,66 +986,30 @@ class FridayToolRegistry:
         )
         return {"company_name": company_name, "pitch_text": pitch}
 
-    def _tool_dispatch_outreach(self, client_name: str, channel: str, pitch_text: str) -> dict[str, Any]:
-        """Dispatches outreach pitch or records draft if no external delivery provider is configured."""
+    def _tool_dispatch_outreach(self, client_name: str, channel: str, pitch_text: str, recipient: str = "", subject: str = "") -> dict[str, Any]:
+        """Dispatches outreach pitch via configured outreach transport."""
         supported_channels = {"email", "linkedin"}
         clean_channel = channel.lower().strip()
-        now = utc_now()
-        pitch_hash = hashlib.sha256(pitch_text.encode("utf-8")).hexdigest()
-        is_sandbox = int(self.permission_controller.is_sandbox)
-
         if clean_channel not in supported_channels:
             raise ValueError(
                 f"Unsupported outreach channel '{channel}'. Supported channels: {sorted(supported_channels)}"
             )
 
-        # Check whether an outreach provider is actually configured in the environment
-        provider = os.environ.get("SOLOEARN_OUTREACH_PROVIDER", "").strip()
-        provider_ack = os.environ.get("SOLOEARN_OUTREACH_ACK", "").strip()
+        from core.outreach_dispatcher import dispatch_client_outreach
 
-        with connect() as conn:
-            if provider and provider_ack:
-                dispatch_id = f"MSG-{uuid.uuid4().hex[:8].upper()}"
-                conn.execute(
-                    """
-                    INSERT INTO friday_communication_logs (
-                        client_name, channel, recipient, subject, body_text,
-                        provider, provider_message_id, status, error_message, is_sandbox, created_at
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, 'dispatched', '', ?, ?)
-                    """,
-                    (client_name, clean_channel, f"{client_name} Contact", "SOLOEARN Value Pitch", pitch_text, provider, dispatch_id, is_sandbox, now),
-                )
-                conn.commit()
-                return {
-                    "status": "dispatched",
-                    "dispatch_id": dispatch_id,
-                    "client_name": client_name,
-                    "channel": clean_channel,
-                    "dispatched_at": now,
-                    "provider": provider,
-                    "verification_hash": pitch_hash,
-                }
-            else:
-                conn.execute(
-                    """
-                    INSERT INTO friday_communication_logs (
-                        client_name, channel, recipient, subject, body_text,
-                        provider, provider_message_id, status, error_message, is_sandbox, created_at
-                    ) VALUES (?, ?, ?, ?, ?, 'unconfigured', '', 'drafted_no_provider_configured', 'No external delivery provider configured in environment.', ?, ?)
-                    """,
-                    (client_name, clean_channel, f"{client_name} Contact", "SOLOEARN Value Pitch", pitch_text, is_sandbox, now),
-                )
-                conn.commit()
-                return {
-                    "status": "drafted_no_provider_configured",
-                    "dispatch_id": "",
-                    "client_name": client_name,
-                    "channel": clean_channel,
-                    "dispatched_at": "",
-                    "provider": "unconfigured",
-                    "notes": "Outreach pitch recorded as draft. External dispatch requires configured delivery provider credentials.",
-                    "verification_hash": pitch_hash,
-                }
+        res = dispatch_client_outreach(
+            client_name=client_name,
+            channel=clean_channel,
+            pitch_text=pitch_text,
+            recipient=recipient,
+            subject=subject,
+            is_sandbox=self.permission_controller.is_sandbox,
+        )
+        out_dict = res.to_dict()
+        out_dict["dispatch_id"] = out_dict.get("message_id", "")
+        if out_dict.get("status") == "delivered":
+            out_dict["status"] = "dispatched"
+        return out_dict
 
     def _tool_draft_proposal(
         self,
@@ -1073,7 +1175,7 @@ class FridayToolRegistry:
 
         csv_bytes = input_csv_content.encode("utf-8")
         current_sha256 = hashlib.sha256(csv_bytes).hexdigest().upper()
-        if current_sha256 != order["dataset_sha256"].upper():
+        if not hmac.compare_digest(current_sha256, order["dataset_sha256"].upper()):
             raise ValueError(
                 f"Dataset integrity verification failed: Input CSV SHA-256 ({current_sha256}) "
                 f"does not match the accepted order dataset ({order['dataset_sha256']}). "
@@ -1185,7 +1287,7 @@ class FridayToolRegistry:
         now = now_dt.isoformat()
         expires_at = (now_dt + timedelta(hours=24)).isoformat()
 
-        raw_token = f"dlv_{uuid.uuid4().hex}"
+        raw_token = f"dlv_{secrets.token_urlsafe(32)}"
         token_hash = hashlib.sha256(raw_token.encode("utf-8")).hexdigest()
 
         client_name = t.get("title", "").replace("Autonomous delivery: ", "").strip() or inv["client_name"]
@@ -1276,14 +1378,24 @@ def download_client_deliverable(
             (clean_token, int(is_sandbox)),
         ).fetchone()
 
-        artifact_path = Path(rec["artifact_path"])
+        # Invariant: Verify download token hash constant-time against database record
+        expected_token_hash = hashlib.sha256(clean_token.encode("utf-8")).hexdigest()
+        if not hmac.compare_digest(expected_token_hash, rec["token_hash"]):
+            conn.rollback()
+            raise ValueError("Invalid or tampered deliverable download token.")
+
+        artifact_path = Path(rec["artifact_path"]).resolve()
+        ws_root = Path(core.config.WORKSPACES_DIR).resolve()
+        if not artifact_path.is_relative_to(ws_root):
+            conn.rollback()
+            raise ValueError("Access denied: Deliverable path outside workspaces directory (CWE-22).")
         if not artifact_path.exists():
             conn.rollback()
             raise ValueError(f"Deliverable package not found at {artifact_path}")
 
         file_bytes = artifact_path.read_bytes()
         calculated_sha = hashlib.sha256(file_bytes).hexdigest().upper()
-        if calculated_sha != rec["file_sha256"].upper():
+        if not hmac.compare_digest(calculated_sha, rec["file_sha256"].upper()):
             conn.rollback()
             raise ValueError("Deliverable integrity check failed: SHA-256 mismatch.")
 
@@ -1634,7 +1746,9 @@ class FridayBrain:
         if res.blocked_by_permission:
             decision = "escalated_owner" if "owner" in res.escalation_reason.lower() else "rejected_safety"
 
-        # Log action durably in friday_action_logs
+        # Log action durably in friday_action_logs with sensitive data redacted
+        safe_args = redact_sensitive_dict(thought.tool_arguments)
+        safe_result = redact_sensitive_dict(res.data if res.success else {"error": res.error_message, "escalation": res.escalation_reason})
         with connect() as conn:
             conn.execute(
                 """
@@ -1648,8 +1762,8 @@ class FridayBrain:
                     step_num,
                     thought.reasoning,
                     thought.proposed_tool,
-                    json.dumps(thought.tool_arguments),
-                    json.dumps(res.data if res.success else {"error": res.error_message, "escalation": res.escalation_reason}),
+                    json.dumps(safe_args),
+                    json.dumps(safe_result),
                     decision,
                     int(self.is_sandbox),
                     utc_now(),

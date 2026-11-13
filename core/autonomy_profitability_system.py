@@ -151,6 +151,10 @@ class QualityAuditResult:
     deliverables_verified: bool
     status: str  # "submission_ready" or "needs_manual_review"
     failure_reasons: list[str] = field(default_factory=list)
+    audit_id: str = ""
+    qa_report_path: str = ""
+    edge_case_status: dict[str, bool] = field(default_factory=dict)
+    qa_report: dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -184,6 +188,8 @@ class OperatingCycleReport:
     invoices_issued: int
     settlements_reconciled: int
     routine_tasks_completed: int
+    outreach_touches_dispatched: int = 0
+    active_sequences_count: int = 0
     escalations: list[EscalatedException] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
@@ -299,38 +305,52 @@ class OpportunityEngine:
         contact_name: str = "Founder / Operations Lead",
         service_tier: str = "data_analytics",
         channel: str = "linkedin",
+        role: str = "founder",
     ) -> str:
         """
         Drafts a question-led, consultative discovery approach addressing real SMB multi-channel
         data reconciliation, catalog errors, or reporting bottlenecks.
+        Leverages standardized high-converting D2C outreach templates.
         """
-        if service_tier in {"csv_reconciliation", "business_automation"}:
-            body = (
-                f"Hi {contact_name},\n\n"
-                f"I've been analyzing operational bottlenecks common in growing Indian D2C and retail brands. "
-                f"As {company_name} scales across multi-channel marketplaces and own-store operations, "
-                f"reconciling payment settlement reports against orders and courier returns often requires hours of manual CSV stitching.\n\n"
-                f"We built an automated data-cleansing and reconciliation engine that normalizes marketplace settlements "
-                f"and flags payment discrepancies with 100% mathematical audit logs. "
-                f"Are multi-channel reconciliation or SKU reporting variances currently a pain point for your team?"
-            )
-        elif service_tier == "interactive_dashboard":
-            body = (
-                f"Hi {contact_name},\n\n"
-                f"Following {company_name}'s brand growth, I noticed teams often struggle with slow, static weekly reporting. "
-                f"We build lightweight, standalone interactive dashboards that allow leadership to filter sales, SKU velocity, "
-                f"and channel margins instantly in any browser without expensive BI subscriptions.\n\n"
-                f"Would an interactive operational dashboard for your core sales channels be helpful to explore?"
-            )
-        else:
-            body = (
-                f"Hi {contact_name},\n\n"
-                f"As {company_name} grows, managing scattered spreadsheets and customer reporting can slow down operations. "
-                f"We build structured business analytics packs that compile multi-tab Excel models, data-quality profiles, "
-                f"and executive summaries with zero formula injection risk.\n\n"
-                f"Would a short review of your current reporting workflow be of interest?"
-            )
-        return body
+        from core.outreach_dispatcher import D2COutreachTemplates
+        clean_role = role.lower().strip()
+        if clean_role not in D2COutreachTemplates.list_supported_roles():
+            clean_role = "coo" if service_tier in {"csv_reconciliation", "business_automation"} else "founder"
+
+        rendered = D2COutreachTemplates.render_template(
+            step=1,
+            channel=channel,
+            role=clean_role,
+            context={
+                "founder_name": contact_name,
+                "company_name": company_name,
+                "channels": "Amazon, Blinkit & Shopify",
+            },
+        )
+        return rendered["body"]
+
+    @classmethod
+    def enroll_prospect_in_outreach(
+        cls,
+        lead_id: int | None,
+        company_name: str,
+        recipient: str,
+        channel: str = "email",
+        role: str = "founder",
+        custom_vars: dict[str, Any] | None = None,
+        is_sandbox: bool = True,
+    ) -> dict[str, Any]:
+        """Enrolls a prospect into the multi-touch cadence via outreach dispatcher."""
+        from core.outreach_dispatcher import enroll_in_sequence
+        return enroll_in_sequence(
+            lead_id=lead_id,
+            client_name=company_name,
+            recipient=recipient,
+            channel=channel,
+            role=role,
+            custom_vars=custom_vars,
+            is_sandbox=is_sandbox,
+        )
 
     @classmethod
     def find_and_score_prospects(cls, is_sandbox: bool = True) -> list[ProspectFit]:
@@ -562,6 +582,7 @@ class DeliveryEngine:
             workspace="pending",
             opportunity_id=opportunity_id,
             notes=f"Automated execution for {client_name}",
+            is_sandbox=is_sandbox,
         )
 
         workspace = safe_workspace_path(f"task_{task_id:04d}")
@@ -603,7 +624,7 @@ class DeliveryEngine:
             elif job.service_tier in {"csv_reconciliation", "business_automation"}:
                 deliverables = execute_business_automation_service(ws, file_bytes, filename, job.client_name)
             else:
-                # Default Tier 1: CSV Analytics Bundle
+                # Default Tier 1: CSV / Excel Analytics Bundle
                 zip_path = create_analytics_bundle(file_bytes, filename, job.task_id)
                 deliverables = ["business_analysis.xlsx", "cleaned_data.csv", "profile.json", "insights.txt", "report.html", "deliverables.zip"]
 
@@ -613,7 +634,9 @@ class DeliveryEngine:
             job.artifact_zip = str(ws / "deliverables.zip")
             job.status = "qa_ready"
 
-            update_task_status(job.task_id, "qa_testing", f"Workflow executed in {t_elapsed}s", artifact_path=job.artifact_zip)
+            mb_processed = round(len(file_bytes) / (1024 * 1024), 2)
+            speed_note = f"Workflow executed in {t_elapsed}s ({mb_processed} MB streamed)"
+            update_task_status(job.task_id, "qa_testing", speed_note, artifact_path=job.artifact_zip)
             return job, deliverables
         finally:
             if opp_id is not None:
@@ -675,6 +698,9 @@ class QualityEngine:
                 update_opportunity_status(job.opportunity_id, "needs_manual_review")
             log_event("qa_failed_delivery_halted", f"task_id={job.task_id}; reasons={final_qa.failure_reasons}")
 
+        qa_report_path = ws / "qa_report.json"
+        report_dict = final_qa.to_dict()
+
         return QualityAuditResult(
             task_id=job.task_id,
             passed=final_qa.passed,
@@ -683,6 +709,10 @@ class QualityEngine:
             deliverables_verified=final_qa.passed,
             status=status,
             failure_reasons=final_qa.failure_reasons,
+            audit_id=final_qa.audit_id,
+            qa_report_path=str(qa_report_path) if qa_report_path.exists() else "",
+            edge_case_status=final_qa.edge_case_verifications,
+            qa_report=report_dict,
         )
 
 

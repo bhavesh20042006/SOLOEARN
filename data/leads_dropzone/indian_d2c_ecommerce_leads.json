@@ -1,0 +1,40 @@
+{
+  "source": "Indian D2C Operations & Merchant Network",
+  "items": [
+    {
+      "title": "Shopify Multi-Store Monthly Sales CSV Cleaning & Financial Model",
+      "description": "Looking for data cleaning expert to reconcile our 3 Shopify store CSV exports, remove duplicates, profile data quality, and compile a multi-tab Excel workbook with summary KPIs and sales distribution charts for management review. Cleaned CSV and HTML report required. Budget: ₹5,000 for 2 hours.",
+      "url": "https://d2c-network.in/opportunities/shopify-sales-cleaning-01",
+      "amount_inr": 5000.0,
+      "estimated_hours": 2.0
+    },
+    {
+      "title": "Payment Gateway Settlement vs Order Log CSV Reconciliation",
+      "description": "Need an automated reconciliation between Razorpay settlement reports, Cashfree logs, and Shopify order IDs. Require header normalization, duplicate row removal, discrepancy identification, and a reusable Python script with test suite. Cleaned reconciled CSV needed. Budget: ₹10,000 for 3 hours.",
+      "url": "https://d2c-network.in/opportunities/razorpay-settlement-reconciliation-02",
+      "amount_inr": 10000.0,
+      "estimated_hours": 3.0
+    },
+    {
+      "title": "Quick Commerce Warehouse Inventory & Dispatch ETL Pipeline",
+      "description": "Need a production Python ETL pipeline script to clean and normalize hourly CSV dispatches across 12 dark stores. Must include schema validation manifest, data dictionary, cleaned output dataset, and automated tests. Budget: ₹15,000 for 5 hours.",
+      "url": "https://d2c-network.in/opportunities/quick-commerce-warehouse-etl-03",
+      "amount_inr": 15000.0,
+      "estimated_hours": 5.0
+    },
+    {
+      "title": "Executive Offline Interactive HTML5 Sales Performance Dashboard",
+      "description": "Require a standalone single-file offline interactive HTML5 dashboard for our leadership team. Must feature real-time client-side search, category filtering, KPI metric cards, and charts based on our quarterly sales CSV. Zero external cloud hosting required. Budget: ₹20,000 for 6 hours.",
+      "url": "https://d2c-network.in/opportunities/executive-html5-dashboard-04",
+      "amount_inr": 20000.0,
+      "estimated_hours": 6.0
+    },
+    {
+      "title": "D2C Apparel Brand Return-To-Origin (RTO) Courier Reconciliation",
+      "description": "Need to clean and reconcile Bluedart, Delhivery, and Shiprocket COD remittance reports against delivered orders. Filter out duplicate rows, identify missing UTRs, calculate net recovered cash, and format into an Excel summary report with distribution charts. Budget: ₹10,000 for 3 hours.",
+      "url": "https://d2c-network.in/opportunities/rto-courier-reconciliation-05",
+      "amount_inr": 10000.0,
+      "estimated_hours": 3.0
+    }
+  ]
+}

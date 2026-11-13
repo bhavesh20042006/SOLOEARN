@@ -50,6 +50,7 @@ from core.financial_ledger import (
     get_cash_and_reserves_summary,
     reconcile_statement_row,
     inr_to_paise,
+    paise_to_inr,
 )
 
 
@@ -144,19 +145,28 @@ def build_upi_payment_url(
     merchant_code: str = "",
     currency: str = "INR",
     initiation_mode: str = "04",
+    transaction_id: str = "",
+    invoice_url: str = "",
+    mode: str = "",
 ) -> str:
     """
-    Constructs a standard UPI Intent & Dynamic QR URI (upi://pay?...).
+    Constructs an NPCI UPI 2026 compliant UPI Intent & Dynamic QR URI (upi://pay?...).
     Initiation Mode Mapping (per NPCI & PSP Integration Standards):
-    - '00': Default transaction
-    - '01': QR code (Standard Dynamic/Static QR)
+    - '00': Default / Static QR transaction
+    - '01': Dynamic QR code presentation (mandates pa, pn, am, cu=INR, tr, tn, mode=01)
     - '02': Secure QR code (Requires acquiring-bank cryptographic digital signature 'sign=...')
-    - '04': Intent (UPI Mobile Web / App-to-App flow - default for interactive links)
+    - '04': Intent (UPI Mobile Web / App-to-App flow - mandates pa, pn, am, cu=INR, tr, tn, mode=04)
     - '05': Secure Intent (Requires acquiring-bank cryptographic digital signature 'sign=...')
 
-    Unsigned requests attempting to use '02' (Secure QR code) or '05' (Secure Intent)
-    are strictly rejected to prevent falsely claiming signed secure compliance.
+    NPCI UPI 2026 Compliance:
+    - Amount is formatted directly from integer paise (f"{paise // 100}.{paise % 100:02d}") to eliminate floating-point drift.
+    - Currency is strictly validated as 'INR'.
+    - Dynamic QR (01) and Intent (04) mandate amount and transaction reference.
+    - Unsigned requests attempting to use '02' (Secure QR code) or '05' (Secure Intent)
+      are strictly rejected to prevent falsely claiming signed secure compliance.
     """
+    if mode:
+        initiation_mode = mode
     vpa = validate_vpa(payee_vpa)
     name = str(payee_name or "").strip()
     if not name:
@@ -183,6 +193,11 @@ def build_upi_payment_url(
 
     note = str(transaction_note or f"Invoice {clean_ref} SOLOEARN").strip()[:80]
 
+    # Validate currency under NPCI domestic UPI standards
+    curr_clean = currency.upper().strip() if currency else "INR"
+    if curr_clean != "INR":
+        raise ValueError(f"Invalid UPI currency: '{curr_clean}'. NPCI UPI standard mandates 'INR'.")
+
     # Validate initiation mode selection per NPCI standards
     mode_str = str(initiation_mode or "").strip()
     if mode_str in {"02", "05"}:
@@ -197,11 +212,15 @@ def build_upi_payment_url(
             f"Invalid initiation mode: '{mode_str}'. Expected '01' (QR code), '04' (Intent), '00' (Default transaction), or '' (Omitted)."
         )
 
+    # Format amount using exact integer paise to eliminate floating-point drift
+    paise = inr_to_paise(amt)
+    am_str = f"{paise // 100}.{paise % 100:02d}"
+
     params = [
         ("pa", vpa),
         ("pn", name),
-        ("am", f"{amt:.2f}"),
-        ("cu", currency.upper() if currency else "INR"),
+        ("am", am_str),
+        ("cu", curr_clean),
         ("tn", note),
         ("tr", clean_ref),
     ]
@@ -212,12 +231,20 @@ def build_upi_payment_url(
     if mode_str:
         params.append(("mode", mode_str))
 
+    tid = str(transaction_id or "").strip()[:35]
+    if tid:
+        params.append(("tid", tid))
+
+    url_val = str(invoice_url or "").strip()[:255]
+    if url_val:
+        params.append(("url", url_val))
+
     query_str = urllib.parse.urlencode(params, quote_via=urllib.parse.quote_plus)
     return f"upi://pay?{query_str}"
 
 
 def parse_upi_payment_url(upi_url: str) -> dict[str, Any]:
-    """Parses a standard upi://pay?... URI and extracts parameters."""
+    """Parses a standard upi://pay?... URI and extracts parameters with exact paise representation."""
     if not upi_url.startswith("upi://pay?"):
         raise ValueError("Invalid UPI URI scheme: must start with 'upi://pay?'")
     query = upi_url[len("upi://pay?"):]
@@ -227,10 +254,138 @@ def parse_upi_payment_url(upi_url: str) -> dict[str, Any]:
         res[k] = v[0] if len(v) == 1 else v
     if "am" in res:
         try:
-            res["am"] = float(res["am"])
+            amt_val = float(res["am"])
+            res["am"] = amt_val
+            res["amount_paise"] = inr_to_paise(amt_val)
         except ValueError:
             pass
+    if "pa" in res:
+        res["payee_vpa"] = res["pa"]
+    if "pn" in res:
+        res["payee_name"] = res["pn"]
     return res
+
+
+def validate_npci_compliance(upi_url: str) -> dict[str, Any]:
+    """
+    Validates a UPI URI against NPCI UPI 2026 specifications:
+    - Dynamic QR (Mode 01): Mandates pa, pn, am, cu=INR, tr, tn, and mode=01.
+    - Intent Flow (Mode 04): Mandates pa, pn, am, cu=INR, tr, tn, and mode=04.
+    - Verifies amount formatting (paise precision, standard ceiling <= 2,00,000).
+    - Validates VPA format and character length constraints.
+    - Rejects unsigned secure modes (Mode 02/05) lacking cryptographic signatures.
+
+    Returns:
+      dict with:
+        - is_compliant: bool
+        - mode: str ('01', '04', '00', etc.)
+        - flow_type: 'Dynamic QR' | 'Intent Flow' | 'Standard UPI'
+        - parameters / extracted_params: dict of extracted query parameters
+        - missing_mandatory_params: list[str]
+        - compliance_errors / errors: list[str]
+    """
+    errors: list[str] = []
+    missing: list[str] = []
+
+    if not isinstance(upi_url, str) or not upi_url.startswith("upi://pay?"):
+        err_msg = "URI does not start with standard 'upi://pay?' scheme"
+        return {
+            "is_compliant": False,
+            "mode": "",
+            "flow_type": "Unknown",
+            "parameters": {},
+            "extracted_params": {},
+            "missing_mandatory_params": ["scheme"],
+            "compliance_errors": [err_msg],
+            "errors": [err_msg],
+        }
+
+    try:
+        params = parse_upi_payment_url(upi_url)
+    except Exception as e:
+        err_msg = f"Failed to parse UPI URL: {e}"
+        return {
+            "is_compliant": False,
+            "mode": "",
+            "flow_type": "Unknown",
+            "parameters": {},
+            "extracted_params": {},
+            "missing_mandatory_params": [],
+            "compliance_errors": [err_msg],
+            "errors": [err_msg],
+        }
+
+    mode = str(params.get("mode", "")).strip()
+
+    # Mode 02 and 05 check: mandate 'sign' parameter
+    if mode in {"02", "05"} and not params.get("sign"):
+        errors.append(f"Mode {mode} requires a secure digital signature ('sign=...') issued by a registered bank PSP.")
+
+    # Mandatory parameters for both Dynamic QR (01) and Intent (04)
+    mandatory = ["pa", "pn", "am", "cu", "tr", "tn", "mode"]
+    for param in mandatory:
+        if param not in params or not str(params[param]).strip():
+            missing.append(param)
+            errors.append(f"Missing mandatory parameter: {param}")
+
+    # VPA check
+    if "pa" in params:
+        try:
+            validate_vpa(str(params["pa"]))
+        except ValueError as e:
+            errors.append(f"Invalid VPA 'pa': {e}")
+
+    # Name check
+    if "pn" in params:
+        pn = str(params["pn"]).strip()
+        if not pn or len(pn) > 99:
+            errors.append("Payee name 'pn' must be between 1 and 99 characters")
+
+    # Currency check
+    if "cu" in params and str(params["cu"]).upper() != "INR":
+        errors.append(f"Currency must be INR (got '{params['cu']}')")
+
+    # Amount check
+    if "am" in params:
+        am_val = params.get("am")
+        try:
+            amt = float(am_val)
+            if not math.isfinite(amt) or amt <= 0:
+                errors.append(f"Amount must be greater than zero (got {amt})")
+            elif amt > 200000.0:
+                errors.append(f"Amount ₹{amt:,.2f} exceeds standard NPCI limit of ₹2,00,000")
+        except (ValueError, TypeError):
+            errors.append(f"Invalid non-numeric amount 'am': {am_val}")
+
+    # Reference check
+    if "tr" in params:
+        tr = str(params["tr"]).strip()
+        if not tr or len(tr) > 35:
+            errors.append("Transaction reference 'tr' must be between 1 and 35 characters")
+
+    # Note check
+    if "tn" in params:
+        tn = str(params["tn"]).strip()
+        if len(tn) > 80:
+            errors.append("Transaction note 'tn' cannot exceed 80 characters")
+
+    # Mode check
+    if mode not in {"00", "01", "04", ""}:
+        errors.append(f"Unsupported initiation mode: '{mode}'. Expected '01' (QR code) or '04' (Intent).")
+
+    is_compliant = len(errors) == 0 and len(missing) == 0
+    flow_type = "Intent Flow" if mode == "04" else ("Dynamic QR" if mode == "01" else "Standard UPI")
+
+    return {
+        "is_compliant": is_compliant,
+        "mode": mode,
+        "flow_type": flow_type,
+        "parameters": params,
+        "extracted_params": params,
+        "missing_mandatory_params": missing,
+        "compliance_errors": errors,
+        "errors": errors,
+    }
 
 
 def generate_upi_qr_bytes(upi_uri: str, box_size: int = 10, border: int = 2) -> bytes:
@@ -265,6 +420,7 @@ def generate_invoice_upi_qr(
     """
     Generates a dynamic scannable QR code (Mode 01: QR code) and payment intent URI (Mode 04: Intent)
     for a specific invoice. Uses the active UPI settings from the database or provided dictionary.
+    Computes exact due amount using paise-level arithmetic and verifies NPCI 2026 compliance.
     """
     settings = upi_settings or get_active_upi_settings()
     vpa = settings.get("payee_vpa", "soloearn@upi")
@@ -272,7 +428,11 @@ def generate_invoice_upi_qr(
     mc = settings.get("merchant_code", "")
 
     inv_num = str(invoice["invoice_number"])
-    total_due = float(invoice.get("amount_total", 0.0))
+    total_inv_paise = inr_to_paise(float(invoice.get("amount_total", 0.0)))
+    paid_paise = inr_to_paise(float(invoice.get("amount_paid", 0.0)))
+    remaining_paise = max(0, total_inv_paise - paid_paise)
+    due_paise = remaining_paise if paid_paise > 0 and remaining_paise > 0 else total_inv_paise
+    total_due = paise_to_inr(due_paise)
     note = f"Invoice {inv_num} SOLOEARN"
 
     # Scannable QR URI uses Mode 01 (QR code per NPCI standards)
@@ -316,6 +476,7 @@ def generate_invoice_upi_qr(
         "payee_vpa": vpa,
         "payee_name": name,
         "amount_inr": total_due,
+        "amount_paise": due_paise,
         "transaction_ref": inv_num,
         "transaction_note": note,
         "upi_uri": qr_upi_uri,
@@ -324,6 +485,11 @@ def generate_invoice_upi_qr(
         "qr_data_uri": qr_base64,
         "qr_file_path": png_path_str,
         "initiation_mode": qr_mode,
+        "intent_mode": "04",
+        "npci_compliance": {
+            "qr_mode_01": validate_npci_compliance(qr_upi_uri),
+            "intent_mode_04": validate_npci_compliance(intent_upi_uri),
+        },
     }
 
 
@@ -443,7 +609,7 @@ def save_upi_settings(
 
 def get_upi_payment_centre_summary() -> dict[str, Any]:
     """
-    Computes the 4 headline financial KPIs for the UPI Payment Centre:
+    Computes the 4 headline financial KPIs for the UPI Payment Centre using exact paise arithmetic:
     1. Invoices Generated (count & ₹ total)
     2. Pending Collection (₹ awaiting settlement)
     3. Confirmed Reconciled (₹ received & confirmed in bank)
@@ -456,20 +622,30 @@ def get_upi_payment_centre_summary() -> dict[str, Any]:
     pending_invoices = [inv for inv in invoices if inv["status"] in {"issued", "payment_pending", "partially_paid"}]
     paid_invoices = [inv for inv in invoices if inv["status"] == "paid"]
 
-    pending_amount = sum(float(inv["amount_total"]) - float(inv.get("amount_paid", 0.0)) for inv in pending_invoices)
-    confirmed_amount = sum(float(inv["amount_total"]) for inv in paid_invoices)
-    total_generated_amount = sum(float(inv["amount_total"]) for inv in invoices)
+    pending_amount_paise = sum(
+        inr_to_paise(float(inv["amount_total"])) - inr_to_paise(float(inv.get("amount_paid", 0.0)))
+        for inv in pending_invoices
+    )
+    confirmed_amount_paise = sum(inr_to_paise(float(inv["amount_total"])) for inv in paid_invoices)
+    total_generated_amount_paise = sum(inr_to_paise(float(inv["amount_total"])) for inv in invoices)
+
+    pending_amount = paise_to_inr(pending_amount_paise)
+    confirmed_amount = paise_to_inr(confirmed_amount_paise)
+    total_generated_amount = paise_to_inr(total_generated_amount_paise)
 
     net_profit = cash_summary.get("net_profit_after_tax_inr", 0.0)
 
     return {
         "total_invoices_count": len(invoices),
         "invoices_generated_count": len(invoices),
-        "total_invoices_amount_inr": round(total_generated_amount, 2),
+        "total_invoices_amount_inr": total_generated_amount,
+        "total_invoices_amount_paise": total_generated_amount_paise,
         "pending_invoices_count": len(pending_invoices),
-        "pending_invoices_amount_inr": round(pending_amount, 2),
+        "pending_invoices_amount_inr": pending_amount,
+        "pending_invoices_amount_paise": pending_amount_paise,
         "confirmed_reconciled_count": len(paid_invoices),
-        "confirmed_reconciled_amount_inr": round(confirmed_amount, 2),
+        "confirmed_reconciled_amount_inr": confirmed_amount,
+        "confirmed_reconciled_amount_paise": confirmed_amount_paise,
         "net_profit_after_tax_inr": net_profit,
         "collected_receipts_inr": cash_summary.get("collected_receipts_inr", 0.0),
         "operating_profit_inr": cash_summary.get("operating_profit_inr", 0.0),
@@ -486,17 +662,19 @@ def scan_and_match_statement_for_upi(
     pending_invoices: list[dict[str, Any]],
 ) -> list[dict[str, Any]]:
     """
-    Automated statement matching logic for UPI credits:
-    Matches unreconciled bank credits against pending invoices.
+    Automated statement matching logic for UPI, NEFT, RTGS, and IMPS credits:
+    Matches unreconciled bank credits against pending invoices with paise-exact arithmetic.
     Match hierarchy:
-    1. Direct Invoice Reference match in narration (e.g. 'INV-2026-0001')
-    2. Exact amount match (where exactly one pending invoice matches the credit)
-    3. UPI UTR / reference match
+    1. Direct Invoice Reference match in narration or bank_ref (e.g. 'INV-2026-0001')
+    2. Parsed bank narration match (extracted channel reference / UTR)
+    3. Exact amount match in integer paise (where exactly one pending invoice matches the credit)
     Reversal and duplicate protection:
     - Skips already reconciled statement rows.
     - Skips debit entries or entries containing 'REVERSAL'.
     - Never auto-marks an invoice paid without verified receiving statement row.
     """
+    from core.financial_ledger import parse_bank_narration
+
     matches: list[dict[str, Any]] = []
 
     for row in statement_rows:
@@ -505,35 +683,50 @@ def scan_and_match_statement_for_upi(
         if str(row.get("tx_type", "")).lower() != "credit":
             continue
 
-        desc = str(row.get("description", "")).upper()
+        raw_desc = str(row.get("description", ""))
+        desc = raw_desc.upper()
         bank_ref = str(row.get("bank_ref", "")).upper()
 
         # Reversal protection: Ignore reversals from automatic crediting
         if "REVERSAL" in desc or "REVERSAL" in bank_ref:
             continue
 
-        amount = round(float(row.get("amount_inr", 0.0)), 2)
+        amount_paise = inr_to_paise(float(row.get("amount_inr", 0.0)))
+        amount = paise_to_inr(amount_paise)
+
+        # Parse narration for deep channel and UTR metadata
+        parsed_narration = parse_bank_narration(raw_desc)
+        if parsed_narration.get("is_reversal"):
+            continue
+        narration_inv_ref = parsed_narration.get("invoice_reference", "").upper()
+        narration_utr = parsed_narration.get("reference_id", "").upper()
 
         matched_inv = None
         match_type = ""
         confidence = 0.0
         is_ambiguous = False
 
-        # Check 1: Invoice number in narration or bank_ref
+        # Check 1: Invoice number in narration, bank_ref, or parsed narration invoice reference
         for inv in pending_invoices:
             inv_num = str(inv["invoice_number"]).upper()
             inv_num_clean = inv_num.replace("-", "")
-            if inv_num in desc or inv_num in bank_ref or inv_num_clean in desc or inv_num_clean in bank_ref:
+            if (
+                inv_num in desc
+                or inv_num in bank_ref
+                or inv_num_clean in desc
+                or inv_num_clean in bank_ref
+                or (narration_inv_ref and (narration_inv_ref == inv_num or narration_inv_ref == inv_num_clean))
+            ):
                 matched_inv = inv
                 match_type = "invoice_number_in_narration"
                 confidence = 1.0
                 break
 
-        # Check 2: Exact amount match if not matched by invoice number
+        # Check 2: Exact amount match in integer paise if not matched by invoice number
         if not matched_inv:
             exact_amt_candidates = [
                 inv for inv in pending_invoices
-                if abs((float(inv["amount_total"]) - float(inv.get("amount_paid", 0.0))) - amount) < 0.01
+                if (inr_to_paise(float(inv["amount_total"])) - inr_to_paise(float(inv.get("amount_paid", 0.0)))) == amount_paise
             ]
             if len(exact_amt_candidates) == 1:
                 matched_inv = exact_amt_candidates[0]
@@ -547,16 +740,22 @@ def scan_and_match_statement_for_upi(
                 is_ambiguous = True
 
         if matched_inv:
+            inv_total_paise = inr_to_paise(float(matched_inv["amount_total"]))
+            inv_paid_paise = inr_to_paise(float(matched_inv.get("amount_paid", 0.0)))
+            inv_due_paise = max(0, inv_total_paise - inv_paid_paise)
             matches.append({
                 "statement_row_id": int(row["id"]),
                 "statement_date": str(row.get("tx_date", "")),
-                "statement_description": str(row.get("description", "")),
+                "statement_description": raw_desc,
                 "statement_amount_inr": amount,
-                "statement_bank_ref": str(row.get("bank_ref", "")),
+                "statement_amount_paise": amount_paise,
+                "statement_bank_ref": str(row.get("bank_ref", "")) or narration_utr,
+                "payment_channel": parsed_narration.get("channel", "UPI"),
                 "matched_invoice_id": int(matched_inv["id"]),
                 "matched_invoice_number": str(matched_inv["invoice_number"]),
                 "matched_client_name": str(matched_inv["client_name"]),
-                "invoice_total_due_inr": float(matched_inv["amount_total"]) - float(matched_inv.get("amount_paid", 0.0)),
+                "invoice_total_due_inr": paise_to_inr(inv_due_paise),
+                "invoice_total_due_paise": inv_due_paise,
                 "match_type": match_type,
                 "confidence": confidence,
                 "is_ambiguous": is_ambiguous,
@@ -615,10 +814,15 @@ def reconcile_upi_payment_from_bank_credit(
         if inv["status"] not in {"issued", "payment_pending", "partially_paid"}:
             raise ValueError(f"Invoice {inv['invoice_number']} is in status '{inv['status']}' and not awaiting payment")
 
-        credit_amt = round(float(st_row["amount_inr"]), 2)
-        total_inv = round(float(inv["amount_total"]), 2)
-        already_paid = round(float(inv.get("amount_paid", 0.0)), 2)
-        remaining_due = round(total_inv - already_paid, 2)
+        credit_paise = inr_to_paise(float(st_row["amount_inr"]))
+        total_inv_paise = inr_to_paise(float(inv["amount_total"]))
+        already_paid_paise = inr_to_paise(float(inv.get("amount_paid", 0.0)))
+        remaining_due_paise = total_inv_paise - already_paid_paise
+
+        credit_amt = paise_to_inr(credit_paise)
+        total_inv = paise_to_inr(total_inv_paise)
+        already_paid = paise_to_inr(already_paid_paise)
+        remaining_due = paise_to_inr(remaining_due_paise)
 
         bank_ref = str(st_row["bank_ref"] or "").strip()
         if bank_ref:
@@ -629,14 +833,14 @@ def reconcile_upi_payment_from_bank_credit(
             if duplicate:
                 raise ValueError(f"Bank reference '{bank_ref}' is already assigned to another paid invoice")
 
-        # Underpayment / Overpayment check
-        if credit_amt > remaining_due:
+        # Underpayment / Overpayment check in exact integer paise
+        if credit_paise > remaining_due_paise:
             raise ValueError(
                 f"Bank credit ₹{credit_amt:,.2f} exceeds remaining invoice balance of ₹{remaining_due:,.2f}. "
                 "Overpayments cannot be reconciled without an amended invoice or credit note."
             )
 
-        is_full_settlement = abs(credit_amt - remaining_due) < 0.01
+        is_full_settlement = credit_paise == remaining_due_paise
 
         if not is_full_settlement and not allow_partial:
             raise ValueError(
@@ -646,7 +850,8 @@ def reconcile_upi_payment_from_bank_credit(
 
         now = utc_now()
         ref_for_row = bank_ref or f"UPI-BANK-ROW-{statement_row_id}"
-        new_paid_total = round(already_paid + credit_amt, 2)
+        new_paid_paise = already_paid_paise + credit_paise
+        new_paid_total = paise_to_inr(new_paid_paise)
         new_status = "paid" if is_full_settlement else "partially_paid"
 
         # Update bank statement row
@@ -686,12 +891,29 @@ def reconcile_upi_payment_from_bank_credit(
         if is_full_settlement:
             conn.execute("UPDATE opportunities SET status = 'paid' WHERE id = ?", (opp_id,))
 
-        # Post transaction to financial_transactions append-only ledger
-        subtotal_ratio = (float(inv["amount_subtotal"]) / total_inv) if total_inv > 0 else 1.0
-        tax_ratio = (float(inv["tax_amount"]) / total_inv) if total_inv > 0 else 0.0
+        # Post transaction to financial_transactions append-only ledger in exact integer paise
+        inv_subtotal_paise = inr_to_paise(float(inv["amount_subtotal"]))
+        inv_tax_paise = inr_to_paise(float(inv["tax_amount"]))
 
-        revenue_portion = round(credit_amt * subtotal_ratio, 2)
-        tax_portion = round(credit_amt * tax_ratio, 2)
+        if total_inv_paise > 0:
+            if is_full_settlement:
+                # Full settlement: allocate remaining subtotal to prevent any 1-paisa drift
+                prior_receipt_row = conn.execute(
+                    "SELECT COALESCE(SUM(amount_paise), 0) FROM financial_transactions WHERE reference_id = ? AND tx_type = 'client_receipt'",
+                    (invoice_number,),
+                ).fetchone()
+                prior_receipt_paise = int(prior_receipt_row[0]) if prior_receipt_row else 0
+                revenue_paise = max(0, inv_subtotal_paise - prior_receipt_paise)
+                tax_paise = credit_paise - revenue_paise
+            else:
+                tax_paise = int(round(credit_paise * inv_tax_paise / total_inv_paise))
+                revenue_paise = credit_paise - tax_paise
+        else:
+            revenue_paise = credit_paise
+            tax_paise = 0
+
+        revenue_portion = paise_to_inr(revenue_paise)
+        tax_portion = paise_to_inr(tax_paise)
 
         is_sb = 1 if inv.get("is_sandbox") else 0
 
@@ -703,7 +925,7 @@ def reconcile_upi_payment_from_bank_credit(
             (
                 str(st_row["tx_date"])[:10],
                 revenue_portion,
-                inr_to_paise(revenue_portion),
+                revenue_paise,
                 invoice_number,
                 f"UPI client receipt for {invoice_number} ({inv['client_name']}) - Ref: {ref_for_row}"
                 + (" (Partial)" if not is_full_settlement else ""),
@@ -712,7 +934,7 @@ def reconcile_upi_payment_from_bank_credit(
             ),
         )
 
-        if tax_portion > 0:
+        if tax_paise > 0:
             conn.execute(
                 """INSERT INTO financial_transactions (
                     tx_date, tx_type, amount_inr, amount_paise, currency,
@@ -721,7 +943,7 @@ def reconcile_upi_payment_from_bank_credit(
                 (
                     str(st_row["tx_date"])[:10],
                     tax_portion,
-                    inr_to_paise(tax_portion),
+                    tax_paise,
                     invoice_number,
                     f"GST collected on UPI payment for {invoice_number}",
                     is_sb,
@@ -735,8 +957,11 @@ def reconcile_upi_payment_from_bank_credit(
         "statement_row_id": statement_row_id,
         "invoice_number": invoice_number,
         "amount_settled_inr": credit_amt,
+        "amount_settled_paise": credit_paise,
         "total_paid_inr": new_paid_total,
-        "remaining_due_inr": round(total_inv - new_paid_total, 2),
+        "total_paid_paise": new_paid_paise,
+        "remaining_due_inr": paise_to_inr(remaining_due_paise - credit_paise),
+        "remaining_due_paise": max(0, remaining_due_paise - credit_paise),
         "status": new_status,
         "payment_reference": ref_for_row,
         "reconciled_at": now,
@@ -1016,35 +1241,39 @@ def process_merchant_bank_webhook(
                     opp_id = int(inv_row["opportunity_id"])
                     conn.execute("UPDATE opportunities SET status = 'paid' WHERE id = ?", (opp_id,))
 
-                    # Register append-only ledger transaction
-                    subtotal = round(float(inv_row["amount_subtotal"]), 2)
-                    tax_amt = round(float(inv_row["tax_amount"]), 2)
+                    # Register append-only ledger transaction in exact integer paise
+                    subtotal_paise = inr_to_paise(float(inv_row["amount_subtotal"]))
+                    tax_paise = inr_to_paise(float(inv_row["tax_amount"]))
+                    subtotal = paise_to_inr(subtotal_paise)
+                    tax_amt = paise_to_inr(tax_paise)
                     conn.execute(
                         """INSERT INTO financial_transactions (
                             tx_date, tx_type, amount_inr, amount_paise, currency,
-                            reference_id, description, is_reversal, created_at
-                        ) VALUES (?, 'client_receipt', ?, ?, 'INR', ?, ?, 0, ?)""",
+                            reference_id, description, is_reversal, is_sandbox, created_at
+                        ) VALUES (?, 'client_receipt', ?, ?, 'INR', ?, ?, 0, ?, ?)""",
                         (
                             now_str[:10],
                             subtotal,
-                            inr_to_paise(subtotal),
+                            subtotal_paise,
                             inv_num,
                             f"Settled merchant UPI payment for {inv_num} ({inv_row['client_name']}) - Ref: {txn_ref}",
+                            is_sim,
                             now_str,
                         ),
                     )
-                    if tax_amt > 0:
+                    if tax_paise > 0:
                         conn.execute(
                             """INSERT INTO financial_transactions (
                                 tx_date, tx_type, amount_inr, amount_paise, currency,
-                                reference_id, description, is_reversal, created_at
-                            ) VALUES (?, 'gst_collected', ?, ?, 'INR', ?, ?, 0, ?)""",
+                                reference_id, description, is_reversal, is_sandbox, created_at
+                            ) VALUES (?, 'gst_collected', ?, ?, 'INR', ?, ?, 0, ?, ?)""",
                             (
                                 now_str[:10],
                                 tax_amt,
-                                inr_to_paise(tax_amt),
+                                tax_paise,
                                 inv_num,
                                 f"GST collected on settled UPI payment for {inv_num}",
+                                is_sim,
                                 now_str,
                             ),
                         )

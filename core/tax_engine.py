@@ -63,12 +63,29 @@ SECTION_393_TDS_SCHEDULE: dict[str, dict[str, Any]] = {
 }
 
 
+def inr_to_paise(amount_inr: float | int) -> int:
+    """Converts a floating-point or numeric INR amount into exact integer paise."""
+    if isinstance(amount_inr, bool):
+        raise ValueError("Amount cannot be a boolean")
+    val = float(amount_inr)
+    if math.isnan(val) or math.isinf(val):
+        raise ValueError("Invalid non-finite currency amount")
+    return int(round(val * 100))
+
+
+def paise_to_inr(paise: int) -> float:
+    """Converts exact integer paise back into INR float rounded to 2 decimals."""
+    return round(paise / 100.0, 2)
+
+
 def calculate_section_393_tds(subtotal_inr: float, category: str) -> float:
-    """Calculates the statutory Section 393 TDS amount for a given invoice subtotal and category."""
+    """Calculates the statutory Section 393 TDS amount for a given invoice subtotal and category in exact integer paise."""
     if category not in SECTION_393_TDS_SCHEDULE:
         raise ValueError(f"Invalid Section 393 category: '{category}'. Valid: {list(SECTION_393_TDS_SCHEDULE)}")
     rate = float(SECTION_393_TDS_SCHEDULE[category]["rate"])
-    return round(max(0.0, float(subtotal_inr)) * rate, 2)
+    subtotal_paise = max(0, inr_to_paise(subtotal_inr))
+    tds_paise = int(round(subtotal_paise * rate))
+    return paise_to_inr(tds_paise)
 
 
 def validate_tax_profile(profile: dict[str, Any] | None) -> dict[str, str]:
@@ -190,10 +207,11 @@ def compute_income_tax_india_2026(
     Computes estimated Indian income tax for a resident individual sole proprietor under
     Section 202, Section 156 (rebate/marginal relief), surcharge bands, and 4% cess.
     """
-    if str(regime).strip() != SUPPORTED_TAX_REGIME:
+    regime_norm = str(regime).strip().lower()
+    if regime_norm not in {SUPPORTED_TAX_REGIME.lower(), "new_2026"}:
         raise ValueError(
             f"Unsupported tax regime {regime!r}; this estimate engine currently supports "
-            f"only {SUPPORTED_TAX_REGIME!r}."
+            f"only {SUPPORTED_TAX_REGIME!r} (or 'new_2026')."
         )
     if isinstance(taxable_income, bool):
         raise ValueError("Taxable income must be numeric, not boolean")
@@ -233,10 +251,13 @@ def compute_income_tax_india_2026(
 
     # Surcharge & marginal relief on surcharge
     surcharge, surcharge_relief, surcharge_rate = compute_surcharge(tax_base, income)
-    tax_before_cess = round(tax_base + surcharge, 2)
+    tax_before_cess_paise = inr_to_paise(tax_base) + inr_to_paise(surcharge)
+    tax_before_cess = paise_to_inr(tax_before_cess_paise)
 
-    cess = round(tax_before_cess * STANDARD_CESS_RATE, 2)
-    total_tax = round(tax_before_cess + cess, 2)
+    cess_paise = int(round(tax_before_cess_paise * STANDARD_CESS_RATE))
+    cess = paise_to_inr(cess_paise)
+    total_tax_paise = tax_before_cess_paise + cess_paise
+    total_tax = paise_to_inr(total_tax_paise)
     effective_rate = round((total_tax / income) * 100.0, 2) if income > 0 else 0.0
 
     return {
@@ -252,6 +273,9 @@ def compute_income_tax_india_2026(
         "cess": cess,
         "total_tax": total_tax,
         "effective_rate_pct": effective_rate,
+        "tax_before_cess_paise": tax_before_cess_paise,
+        "cess_paise": cess_paise,
+        "total_tax_paise": total_tax_paise,
     }
 
 
@@ -262,7 +286,7 @@ def compute_business_incremental_tax(
 ) -> dict[str, float]:
     """
     Computes the incremental income tax directly attributable to business income,
-    accounting for other declared personal taxable income.
+    accounting for other declared personal taxable income with exact paise precision.
     """
     b_income = max(0.0, float(business_taxable_income))
     o_income = max(0.0, float(other_annual_income))
@@ -270,7 +294,8 @@ def compute_business_incremental_tax(
 
     tax_total = compute_income_tax_india_2026(tot_income, regime=regime)
     tax_other = compute_income_tax_india_2026(o_income, regime=regime)
-    inc_tax = max(0.0, round(tax_total["total_tax"] - tax_other["total_tax"], 2))
+    inc_tax_paise = max(0, inr_to_paise(tax_total["total_tax"]) - inr_to_paise(tax_other["total_tax"]))
+    inc_tax = paise_to_inr(inc_tax_paise)
 
     return {
         "business_taxable_income": b_income,

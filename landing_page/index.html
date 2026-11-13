@@ -1,0 +1,1227 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>SOLOEARN | B2B Data Analytics & Reconciliation for Modern D2C & Retail Brands</title>
+  <meta name="description" content="Turn messy multi-channel e-commerce CSVs, order exports, and payment settlements into formula-verified Excel models, automated reconciliation pipelines, and interactive dashboards in 24-48 hours.">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+  <style>
+    :root {
+      --bg-dark: #0a0f1d;
+      --bg-card: #111827;
+      --bg-card-hover: #17223b;
+      --border: #1f293d;
+      --border-highlight: #3b82f6;
+      --text-main: #f8fafc;
+      --text-muted: #94a3b8;
+      --accent-blue: #3b82f6;
+      --accent-cyan: #06b6d4;
+      --accent-emerald: #10b981;
+      --accent-amber: #f59e0b;
+      --accent-indigo: #6366f1;
+      --radius: 14px;
+      --font-sans: 'Plus Jakarta Sans', -apple-system, BlinkMacSystemFont, sans-serif;
+      --font-mono: 'JetBrains Mono', monospace;
+    }
+
+    * {
+      box-sizing: border-box;
+      margin: 0;
+      padding: 0;
+    }
+
+    body {
+      font-family: var(--font-sans);
+      background-color: var(--bg-dark);
+      color: var(--text-main);
+      line-height: 1.6;
+      overflow-x: hidden;
+      -webkit-font-smoothing: antialiased;
+    }
+
+    /* Container */
+    .container {
+      max-width: 1200px;
+      margin: 0 auto;
+      padding: 0 24px;
+    }
+
+    /* Navigation */
+    header {
+      position: sticky;
+      top: 0;
+      z-index: 100;
+      background: rgba(10, 15, 29, 0.85);
+      backdrop-filter: blur(12px);
+      border-bottom: 1px solid var(--border);
+    }
+
+    .nav-wrapper {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      height: 72px;
+    }
+
+    .brand {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      text-decoration: none;
+      color: var(--text-main);
+      font-weight: 800;
+      font-size: 1.25rem;
+      letter-spacing: -0.5px;
+    }
+
+    .brand-badge {
+      background: linear-gradient(135deg, #3b82f6, #06b6d4);
+      color: #fff;
+      font-size: 0.7rem;
+      font-weight: 700;
+      padding: 2px 8px;
+      border-radius: 6px;
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+    }
+
+    nav a {
+      color: var(--text-muted);
+      text-decoration: none;
+      font-size: 0.95rem;
+      font-weight: 500;
+      margin-left: 28px;
+      transition: color 0.2s ease;
+    }
+
+    nav a:hover {
+      color: var(--text-main);
+    }
+
+    .cta-btn {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      background: linear-gradient(135deg, #2563eb, #1d4ed8);
+      color: #fff;
+      padding: 10px 22px;
+      border-radius: 999px;
+      text-decoration: none;
+      font-weight: 600;
+      font-size: 0.9rem;
+      border: 1px solid rgba(255, 255, 255, 0.15);
+      box-shadow: 0 4px 14px rgba(37, 99, 235, 0.35);
+      transition: transform 0.15s ease, box-shadow 0.15s ease;
+    }
+
+    .cta-btn:hover {
+      transform: translateY(-1px);
+      box-shadow: 0 6px 20px rgba(37, 99, 235, 0.5);
+    }
+
+    .cta-btn-outline {
+      background: transparent;
+      border: 1px solid var(--border);
+      color: var(--text-main);
+      box-shadow: none;
+    }
+
+    .cta-btn-outline:hover {
+      background: var(--bg-card);
+      border-color: var(--text-muted);
+    }
+
+    /* Hero Section */
+    .hero {
+      padding: 96px 0 64px;
+      text-align: center;
+      position: relative;
+    }
+
+    .hero-pill {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      background: rgba(59, 130, 246, 0.1);
+      border: 1px solid rgba(59, 130, 246, 0.25);
+      color: #93c5fd;
+      padding: 6px 16px;
+      border-radius: 999px;
+      font-size: 0.85rem;
+      font-weight: 600;
+      margin-bottom: 24px;
+    }
+
+    .hero-pill span.pulse {
+      width: 8px;
+      height: 8px;
+      background: var(--accent-emerald);
+      border-radius: 50%;
+      box-shadow: 0 0 10px var(--accent-emerald);
+    }
+
+    .hero h1 {
+      font-size: clamp(2.4rem, 5vw, 4rem);
+      font-weight: 800;
+      line-height: 1.15;
+      letter-spacing: -1.5px;
+      max-width: 900px;
+      margin: 0 auto 24px;
+      background: linear-gradient(180deg, #ffffff 30%, #94a3b8 100%);
+      -webkit-background-clip: text;
+      -webkit-text-fill-color: transparent;
+    }
+
+    .hero p {
+      font-size: clamp(1.05rem, 2vw, 1.25rem);
+      color: var(--text-muted);
+      max-width: 720px;
+      margin: 0 auto 36px;
+      font-weight: 400;
+    }
+
+    .hero-actions {
+      display: flex;
+      justify-content: center;
+      gap: 16px;
+      flex-wrap: wrap;
+      margin-bottom: 48px;
+    }
+
+    .hero-trust {
+      display: flex;
+      justify-content: center;
+      align-items: center;
+      gap: 32px;
+      color: var(--text-muted);
+      font-size: 0.85rem;
+      font-weight: 500;
+      flex-wrap: wrap;
+    }
+
+    .hero-trust div {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+    }
+
+    .hero-trust svg {
+      color: var(--accent-emerald);
+    }
+
+    /* Statistics Banner */
+    .stat-banner {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+      gap: 20px;
+      margin: 40px 0 80px;
+    }
+
+    .stat-card {
+      background: var(--bg-card);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      padding: 24px;
+      text-align: center;
+      position: relative;
+      overflow: hidden;
+    }
+
+    .stat-card::before {
+      content: '';
+      position: absolute;
+      top: 0;
+      left: 0;
+      right: 0;
+      height: 3px;
+      background: linear-gradient(90deg, var(--accent-blue), var(--accent-cyan));
+    }
+
+    .stat-value {
+      font-size: 2.2rem;
+      font-weight: 800;
+      color: #fff;
+      font-family: var(--font-mono);
+      letter-spacing: -1px;
+    }
+
+    .stat-label {
+      font-size: 0.85rem;
+      color: var(--text-muted);
+      margin-top: 4px;
+      font-weight: 500;
+    }
+
+    /* Section Headers */
+    .section-header {
+      text-align: center;
+      margin-bottom: 56px;
+    }
+
+    .section-tag {
+      font-size: 0.8rem;
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: 1.5px;
+      color: var(--accent-cyan);
+      margin-bottom: 8px;
+    }
+
+    .section-title {
+      font-size: 2.3rem;
+      font-weight: 800;
+      letter-spacing: -1px;
+      color: #fff;
+      margin-bottom: 12px;
+    }
+
+    .section-subtitle {
+      font-size: 1.05rem;
+      color: var(--text-muted);
+      max-width: 600px;
+      margin: 0 auto;
+    }
+
+    /* Tiers Grid */
+    .tiers-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+      gap: 24px;
+      margin-bottom: 80px;
+    }
+
+    .tier-card {
+      background: var(--bg-card);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      padding: 32px 26px;
+      display: flex;
+      flex-direction: column;
+      position: relative;
+      transition: transform 0.2s ease, border-color 0.2s ease;
+    }
+
+    .tier-card:hover {
+      transform: translateY(-4px);
+      border-color: var(--border-highlight);
+    }
+
+    .tier-card.featured {
+      border-color: var(--accent-blue);
+      background: linear-gradient(180deg, #131c31 0%, var(--bg-card) 100%);
+      box-shadow: 0 8px 32px rgba(59, 130, 246, 0.15);
+    }
+
+    .tier-badge {
+      position: absolute;
+      top: 16px;
+      right: 16px;
+      background: rgba(59, 130, 246, 0.2);
+      border: 1px solid rgba(59, 130, 246, 0.4);
+      color: #93c5fd;
+      font-size: 0.7rem;
+      font-weight: 700;
+      padding: 3px 10px;
+      border-radius: 999px;
+      text-transform: uppercase;
+    }
+
+    .tier-name {
+      font-size: 1.15rem;
+      font-weight: 700;
+      color: #fff;
+      margin-bottom: 6px;
+    }
+
+    .tier-desc {
+      font-size: 0.85rem;
+      color: var(--text-muted);
+      margin-bottom: 20px;
+      min-height: 48px;
+    }
+
+    .tier-price-box {
+      margin-bottom: 24px;
+      padding-bottom: 20px;
+      border-bottom: 1px solid var(--border);
+    }
+
+    .tier-price {
+      font-size: 2.2rem;
+      font-weight: 800;
+      color: #fff;
+      font-family: var(--font-mono);
+    }
+
+    .tier-subprice {
+      font-size: 0.85rem;
+      color: var(--text-muted);
+      font-weight: 500;
+    }
+
+    .tier-features {
+      list-style: none;
+      margin-bottom: 28px;
+      flex-grow: 1;
+    }
+
+    .tier-features li {
+      font-size: 0.88rem;
+      color: #cbd5e1;
+      margin-bottom: 12px;
+      display: flex;
+      align-items: flex-start;
+      gap: 10px;
+    }
+
+    .tier-features li svg {
+      flex-shrink: 0;
+      color: var(--accent-cyan);
+      margin-top: 3px;
+    }
+
+    .tier-action-btn {
+      width: 100%;
+      text-align: center;
+      padding: 12px 18px;
+      border-radius: 10px;
+      font-weight: 600;
+      font-size: 0.9rem;
+      text-decoration: none;
+      display: inline-block;
+      transition: all 0.15s ease;
+    }
+
+    .tier-action-primary {
+      background: var(--accent-blue);
+      color: #fff;
+    }
+
+    .tier-action-primary:hover {
+      background: #2563eb;
+    }
+
+    .tier-action-secondary {
+      background: rgba(255, 255, 255, 0.05);
+      border: 1px solid var(--border);
+      color: var(--text-main);
+    }
+
+    .tier-action-secondary:hover {
+      background: rgba(255, 255, 255, 0.1);
+      border-color: var(--text-muted);
+    }
+
+    /* Live Interactive Simulator Section */
+    .simulator-section {
+      background: var(--bg-card);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      padding: 40px;
+      margin-bottom: 80px;
+    }
+
+    .sim-nav {
+      display: flex;
+      gap: 12px;
+      border-bottom: 1px solid var(--border);
+      padding-bottom: 16px;
+      margin-bottom: 28px;
+      overflow-x: auto;
+    }
+
+    .sim-tab-btn {
+      background: transparent;
+      border: 1px solid transparent;
+      color: var(--text-muted);
+      padding: 8px 18px;
+      border-radius: 8px;
+      font-size: 0.9rem;
+      font-weight: 600;
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      font-family: var(--font-sans);
+      transition: all 0.2s ease;
+    }
+
+    .sim-tab-btn:hover {
+      color: var(--text-main);
+    }
+
+    .sim-tab-btn.active {
+      background: rgba(59, 130, 246, 0.15);
+      border-color: rgba(59, 130, 246, 0.4);
+      color: #93c5fd;
+    }
+
+    .sim-view {
+      display: none;
+    }
+
+    .sim-view.active {
+      display: block;
+    }
+
+    /* Dashboard Preview Inside Simulator */
+    .dash-preview {
+      background: #090e1a;
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      padding: 24px;
+    }
+
+    .dash-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      margin-bottom: 24px;
+      flex-wrap: wrap;
+      gap: 12px;
+    }
+
+    .dash-kpis {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+      gap: 16px;
+      margin-bottom: 24px;
+    }
+
+    .dash-kpi {
+      background: #111827;
+      border: 1px solid var(--border);
+      padding: 16px;
+      border-radius: 10px;
+    }
+
+    .dash-kpi .kpi-num {
+      font-size: 1.5rem;
+      font-weight: 800;
+      font-family: var(--font-mono);
+      color: var(--accent-emerald);
+    }
+
+    .dash-kpi .kpi-title {
+      font-size: 0.75rem;
+      color: var(--text-muted);
+      text-transform: uppercase;
+      margin-top: 4px;
+      font-weight: 600;
+    }
+
+    .dash-table {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 0.85rem;
+      text-align: left;
+    }
+
+    .dash-table th {
+      background: #17223b;
+      color: var(--text-muted);
+      padding: 10px 14px;
+      font-weight: 600;
+      border-bottom: 1px solid var(--border);
+    }
+
+    .dash-table td {
+      padding: 12px 14px;
+      border-bottom: 1px solid rgba(255, 255, 255, 0.05);
+      color: #e2e8f0;
+      font-family: var(--font-mono);
+    }
+
+    /* QA Scorecard Preview */
+    .qa-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+      gap: 16px;
+    }
+
+    .qa-item {
+      background: #090e1a;
+      border: 1px solid var(--border);
+      padding: 18px;
+      border-radius: 10px;
+      display: flex;
+      align-items: flex-start;
+      gap: 14px;
+    }
+
+    .qa-icon-pass {
+      color: var(--accent-emerald);
+      flex-shrink: 0;
+      background: rgba(16, 185, 129, 0.1);
+      padding: 8px;
+      border-radius: 8px;
+    }
+
+    .qa-text h4 {
+      font-size: 0.95rem;
+      color: #fff;
+      margin-bottom: 4px;
+    }
+
+    .qa-text p {
+      font-size: 0.8rem;
+      color: var(--text-muted);
+      line-height: 1.4;
+    }
+
+    /* Calculator Section */
+    .calc-box {
+      background: var(--bg-card);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      padding: 40px;
+      margin-bottom: 80px;
+    }
+
+    .calc-grid {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 40px;
+      align-items: center;
+    }
+
+    @media (max-width: 800px) {
+      .calc-grid {
+        grid-template-columns: 1fr;
+      }
+    }
+
+    .calc-slider-group {
+      margin-bottom: 24px;
+    }
+
+    .calc-slider-group label {
+      display: flex;
+      justify-content: space-between;
+      font-size: 0.95rem;
+      font-weight: 600;
+      margin-bottom: 8px;
+      color: #e2e8f0;
+    }
+
+    .calc-slider-group input[type="range"] {
+      width: 100%;
+      height: 6px;
+      border-radius: 3px;
+      background: var(--border);
+      accent-color: var(--accent-blue);
+      cursor: pointer;
+    }
+
+    .calc-result-panel {
+      background: #090e1a;
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      padding: 30px;
+      text-align: center;
+    }
+
+    .calc-rec-tier {
+      font-size: 1.3rem;
+      font-weight: 800;
+      color: var(--accent-cyan);
+      margin-bottom: 6px;
+    }
+
+    .calc-savings {
+      font-size: 2.5rem;
+      font-weight: 800;
+      color: var(--accent-emerald);
+      font-family: var(--font-mono);
+      margin: 14px 0 6px;
+    }
+
+    /* Contact Section */
+    .contact-card {
+      background: linear-gradient(180deg, #131c31 0%, var(--bg-card) 100%);
+      border: 1px solid var(--accent-blue);
+      border-radius: var(--radius);
+      padding: 48px;
+      text-align: center;
+      margin-bottom: 80px;
+      box-shadow: 0 10px 40px rgba(59, 130, 246, 0.15);
+    }
+
+    .contact-card h2 {
+      font-size: 2.2rem;
+      font-weight: 800;
+      margin-bottom: 12px;
+      color: #fff;
+    }
+
+    .contact-card p {
+      color: var(--text-muted);
+      max-width: 600px;
+      margin: 0 auto 32px;
+      font-size: 1.05rem;
+    }
+
+    .contact-methods {
+      display: flex;
+      justify-content: center;
+      gap: 16px;
+      flex-wrap: wrap;
+      margin-bottom: 24px;
+    }
+
+    /* Footer */
+    footer {
+      border-top: 1px solid var(--border);
+      padding: 40px 0;
+      text-align: center;
+      font-size: 0.85rem;
+      color: var(--text-muted);
+    }
+
+    .footer-links {
+      display: flex;
+      justify-content: center;
+      gap: 24px;
+      margin-bottom: 16px;
+    }
+
+    .footer-links a {
+      color: var(--text-muted);
+      text-decoration: none;
+    }
+
+    .footer-links a:hover {
+      color: #fff;
+    }
+  </style>
+</head>
+<body>
+
+  <!-- Navigation -->
+  <header>
+    <div class="container nav-wrapper">
+      <a href="#" class="brand">
+        <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" color="#3b82f6"><polygon points="12 2 2 7 12 12 22 7 12 2"></polygon><polyline points="2 17 12 22 22 17"></polyline><polyline points="2 12 12 17 22 12"></polyline></svg>
+        SOLOEARN
+        <span class="brand-badge">B2B Ops</span>
+      </a>
+      <nav>
+        <a href="#services">Services & Pricing</a>
+        <a href="#demo">Live Demo</a>
+        <a href="#qa-guarantee">6-Suite QA</a>
+        <a href="#calculator">ROI Calculator</a>
+      </nav>
+      <a href="#contact" class="cta-btn">
+        Book ₹5,000 Pilot
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M5 12h14M12 5l7 7-7 7"/></svg>
+      </a>
+    </div>
+  </header>
+
+  <!-- Hero -->
+  <section class="hero">
+    <div class="container">
+      <div class="hero-pill">
+        <span class="pulse"></span>
+        Zero Cloud Leakage • Local Hardware Execution • 24–48h Turnaround
+      </div>
+      <h1>Autonomous Data Intelligence & Reconciliation for Indian D2C Brands</h1>
+      <p>
+        Stop burning senior operational hours manually fixing CSV exports and reconciling payment gateways. We transform messy multi-channel Shopify, POS, COD courier, and warehouse records into formula-verified financial models and executive dashboards.
+      </p>
+      <div class="hero-actions">
+        <a href="#contact" class="cta-btn">
+          Start With a ₹5,000 Pilot Job
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M5 12h14M12 5l7 7-7 7"/></svg>
+        </a>
+        <a href="#demo" class="cta-btn cta-btn-outline">
+          Explore Sample Deliverables
+        </a>
+      </div>
+      <div class="hero-trust">
+        <div>
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="20 6 9 17 4 12"></polyline></svg>
+          Independent QA Scorecard Included
+        </div>
+        <div>
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="20 6 9 17 4 12"></polyline></svg>
+          Zero Third-Party Cloud Data Sharing
+        </div>
+        <div>
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="20 6 9 17 4 12"></polyline></svg>
+          Instant UPI QR Invoicing (0% Surcharge)
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- Statistics Banner -->
+  <div class="container">
+    <div class="stat-banner">
+      <div class="stat-card">
+        <div class="stat-value">24–48h</div>
+        <div class="stat-label">Guaranteed SLA Turnaround</div>
+      </div>
+      <div class="stat-card">
+        <div class="stat-value">100%</div>
+        <div class="stat-label">Deterministic QA Pass Rate</div>
+      </div>
+      <div class="stat-card">
+        <div class="stat-value">₹5,000</div>
+        <div class="stat-label">Transparent Fixed Base Price</div>
+      </div>
+      <div class="stat-card">
+        <div class="stat-value">0%</div>
+        <div class="stat-label">External AI Cloud Data Leakage</div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Services & Transparent Pricing -->
+  <section id="services" class="container" style="padding-bottom: 60px;">
+    <div class="section-header">
+      <div class="section-tag">Flat, Predictable Rates</div>
+      <h2 class="section-title">4 Specialized Service Workflows</h2>
+      <p class="section-subtitle">No hourly ambiguity, no runaway scope. Every deliverable comes with complete source files, audit reports, and test verification.</p>
+    </div>
+
+    <div class="tiers-grid">
+      <!-- Tier 1 -->
+      <div class="tier-card featured">
+        <div class="tier-badge">Most Popular Pilot</div>
+        <h3 class="tier-name">Tier 1: Business Analytics & Excel Pack</h3>
+        <p class="tier-desc">Multi-channel order analytics, customer cohort breakdowns, and audit-ready Excel models.</p>
+        <div class="tier-price-box">
+          <div class="tier-price">₹5,000</div>
+          <div class="tier-subprice">Per dataset • 24h Turnaround</div>
+        </div>
+        <ul class="tier-features">
+          <li>
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="20 6 9 17 4 12"></polyline></svg>
+            Cleaned CSV dataset & schema audit
+          </li>
+          <li>
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="20 6 9 17 4 12"></polyline></svg>
+            Multi-tab Excel model with verified formulas
+          </li>
+          <li>
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="20 6 9 17 4 12"></polyline></svg>
+            Order distribution & category charts (PNG)
+          </li>
+          <li>
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="20 6 9 17 4 12"></polyline></svg>
+            Executive HTML summary report
+          </li>
+          <li>
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="20 6 9 17 4 12"></polyline></svg>
+            6-suite QA verification scorecard
+          </li>
+        </ul>
+        <a href="#contact" class="tier-action-btn tier-action-primary">Request Tier 1 Pilot</a>
+      </div>
+
+      <!-- Tier 2 -->
+      <div class="tier-card">
+        <h3 class="tier-name">Tier 2: CSV Reconciliation Automation</h3>
+        <p class="tier-desc">Automated matching between payment gateway UTRs, courier COD payouts, and Shopify orders.</p>
+        <div class="tier-price-box">
+          <div class="tier-price">₹10,000</div>
+          <div class="tier-subprice">Per workflow • 48h Turnaround</div>
+        </div>
+        <ul class="tier-features">
+          <li>
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="20 6 9 17 4 12"></polyline></svg>
+            Discrepancy and unmatched transaction audit
+          </li>
+          <li>
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="20 6 9 17 4 12"></polyline></svg>
+            Duplicate row elimination & header normalization
+          </li>
+          <li>
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="20 6 9 17 4 12"></polyline></svg>
+            Reusable standalone Python reconciliation script
+          </li>
+          <li>
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="20 6 9 17 4 12"></polyline></svg>
+            Reconciled clean CSV + discrepancy breakdown
+          </li>
+          <li>
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="20 6 9 17 4 12"></polyline></svg>
+            Complete unit test suite verifying reconciliation
+          </li>
+        </ul>
+        <a href="#contact" class="tier-action-btn tier-action-secondary">Choose Tier 2</a>
+      </div>
+
+      <!-- Tier 3 -->
+      <div class="tier-card">
+        <h3 class="tier-name">Tier 3: Data Engineering ETL Pipeline</h3>
+        <p class="tier-desc">Automate your raw data ingestion, transformation, and database-ready exports with zero downtime.</p>
+        <div class="tier-price-box">
+          <div class="tier-price">₹15,000</div>
+          <div class="tier-subprice">Per pipeline • 48h Turnaround</div>
+        </div>
+        <ul class="tier-features">
+          <li>
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="20 6 9 17 4 12"></polyline></svg>
+            End-to-end Python ingestion & transformation code
+          </li>
+          <li>
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="20 6 9 17 4 12"></polyline></svg>
+            Data dictionary & schema validation manifest
+          </li>
+          <li>
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="20 6 9 17 4 12"></polyline></svg>
+            Cleaned and typed dataset outputs
+          </li>
+          <li>
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="20 6 9 17 4 12"></polyline></svg>
+            Edge-case automated test suite included
+          </li>
+          <li>
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="20 6 9 17 4 12"></polyline></svg>
+            Operator setup instructions & README
+          </li>
+        </ul>
+        <a href="#contact" class="tier-action-btn tier-action-secondary">Choose Tier 3</a>
+      </div>
+
+      <!-- Tier 4 -->
+      <div class="tier-card">
+        <h3 class="tier-name">Tier 4: Executive Interactive Dashboard</h3>
+        <p class="tier-desc">A self-contained, offline-ready HTML5 dashboard. Zero monthly server fees, zero recurring SaaS costs.</p>
+        <div class="tier-price-box">
+          <div class="tier-price">₹20,000</div>
+          <div class="tier-subprice">Per dashboard • 48h Turnaround</div>
+        </div>
+        <ul class="tier-features">
+          <li>
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="20 6 9 17 4 12"></polyline></svg>
+            Single-file offline HTML5 interactive dashboard
+          </li>
+          <li>
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="20 6 9 17 4 12"></polyline></svg>
+            Client-side real-time search & column filtering
+          </li>
+          <li>
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="20 6 9 17 4 12"></polyline></svg>
+            Responsive KPI cards & dynamic metric charts
+          </li>
+          <li>
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="20 6 9 17 4 12"></polyline></svg>
+            Escaped HTML protection (no XSS risk)
+          </li>
+          <li>
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="20 6 9 17 4 12"></polyline></svg>
+            Complete User Guide & metric definitions
+          </li>
+        </ul>
+        <a href="#contact" class="tier-action-btn tier-action-secondary">Choose Tier 4</a>
+      </div>
+    </div>
+  </section>
+
+  <!-- Live Deliverable Simulator -->
+  <section id="demo" class="container">
+    <div class="simulator-section">
+      <div class="section-header" style="margin-bottom: 30px;">
+        <div class="section-tag">Interactive Preview</div>
+        <h2 class="section-title">See What You Actually Receive</h2>
+        <p class="section-subtitle">Toggle through the live simulations below to inspect the structure and quality of our deliverable packages.</p>
+      </div>
+
+      <div class="sim-nav">
+        <button class="sim-tab-btn active" onclick="switchSimTab('dash')">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="18" height="18" rx="2"/><path d="M3 9h18M9 21V9"/></svg>
+          Executive HTML5 Dashboard
+        </button>
+        <button class="sim-tab-btn" onclick="switchSimTab('excel')">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/></svg>
+          Excel Model & Analytics Pack
+        </button>
+        <button class="sim-tab-btn" onclick="switchSimTab('qa')">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/><polyline points="22 4 12 14.01 9 11.01"/></svg>
+          Independent QA Scorecard
+        </button>
+      </div>
+
+      <!-- Tab 1: Dashboard -->
+      <div id="sim-dash" class="sim-view active">
+        <div class="dash-preview">
+          <div class="dash-header">
+            <div>
+              <h3 style="font-size: 1.15rem; color:#fff;">D2C Multi-Channel Sales Performance Overview</h3>
+              <p style="font-size: 0.8rem; color:var(--text-muted);">Period: Last 30 Days • Status: Cleaned & Reconciled</p>
+            </div>
+            <span style="background: rgba(16,185,129,0.15); color: #34d399; font-size: 0.75rem; padding: 4px 10px; border-radius: 6px; font-weight: 600;">Offline Ready HTML5</span>
+          </div>
+
+          <div class="dash-kpis">
+            <div class="dash-kpi">
+              <div class="kpi-num">₹28,45,200</div>
+              <div class="kpi-title">Gross Revenue (Shopify+POS)</div>
+            </div>
+            <div class="dash-kpi">
+              <div class="kpi-num">1,842</div>
+              <div class="kpi-title">Orders Processed</div>
+            </div>
+            <div class="dash-kpi">
+              <div class="kpi-num" style="color: #60a5fa;">₹1,544</div>
+              <div class="kpi-title">Average Order Value (AOV)</div>
+            </div>
+            <div class="dash-kpi">
+              <div class="kpi-num" style="color: #f59e0b;">4.2%</div>
+              <div class="kpi-title">Discrepancy / Return Rate</div>
+            </div>
+          </div>
+
+          <div style="overflow-x: auto;">
+            <table class="dash-table">
+              <thead>
+                <tr>
+                  <th>Channel / Source</th>
+                  <th>Orders</th>
+                  <th>Total GMV</th>
+                  <th>Settlement Status</th>
+                  <th>Reconciliation</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr>
+                  <td>Shopify D2C Store</td>
+                  <td>1,120</td>
+                  <td>₹17,35,000</td>
+                  <td><span style="color: #34d399;">100% Cleared (Razorpay)</span></td>
+                  <td>Matched (0 mismatch)</td>
+                </tr>
+                <tr>
+                  <td>Offline Retail POS (Bengaluru)</td>
+                  <td>412</td>
+                  <td>₹6,80,200</td>
+                  <td><span style="color: #34d399;">Pine Labs Settled</span></td>
+                  <td>Matched (0 mismatch)</td>
+                </tr>
+                <tr>
+                  <td>COD Courier (Tier 2/3)</td>
+                  <td>310</td>
+                  <td>₹4,30,000</td>
+                  <td><span style="color: #f59e0b;">₹3,92,000 Remitted</span></td>
+                  <td>₹38k RTO Pending</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+
+      <!-- Tab 2: Excel Pack -->
+      <div id="sim-excel" class="sim-view">
+        <div class="dash-preview">
+          <h3 style="color:#fff; margin-bottom: 8px;">Multi-Tab openpyxl Financial Workbook (`business_analysis.xlsx`)</h3>
+          <p style="color:var(--text-muted); font-size:0.85rem; margin-bottom: 20px;">
+            Every model is compiled with strictly validated openpyxl sheets, clean table schemas, and mathematical verification.
+          </p>
+          <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 14px;">
+            <div style="background:#111827; border: 1px solid var(--border); padding: 16px; border-radius: 8px;">
+              <h4 style="color:#60a5fa; font-size: 0.9rem;">Sheet 1: Cleaned Data</h4>
+              <p style="font-size: 0.78rem; color:var(--text-muted); margin-top: 4px;">Deduplicated records, standard ISO date strings, stripped whitespace, validated datatypes.</p>
+            </div>
+            <div style="background:#111827; border: 1px solid var(--border); padding: 16px; border-radius: 8px;">
+              <h4 style="color:#34d399; font-size: 0.9rem;">Sheet 2: KPI & Summary</h4>
+              <p style="font-size: 0.78rem; color:var(--text-muted); margin-top: 4px;">Audited formula calculations (=AVERAGE, =SUM, =STDEV) with zero manual copy-paste errors.</p>
+            </div>
+            <div style="background:#111827; border: 1px solid var(--border); padding: 16px; border-radius: 8px;">
+              <h4 style="color:#f59e0b; font-size: 0.9rem;">Sheet 3: Data Quality Profile</h4>
+              <p style="font-size: 0.78rem; color:var(--text-muted); margin-top: 4px;">Completeness percentages, missing value counts, and column distribution bounds.</p>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Tab 3: QA Scorecard -->
+      <div id="sim-qa" class="sim-view">
+        <div class="dash-preview">
+          <div class="dash-header">
+            <div>
+              <h3 style="color:#fff; font-size: 1.15rem;">Independent QA Agent Scorecard (JSON & Audit Log)</h3>
+              <p style="color:var(--text-muted); font-size: 0.8rem;">6-Suite Deterministic Security & Integrity Verification</p>
+            </div>
+            <span style="background: rgba(16,185,129,0.2); color: #34d399; padding: 4px 12px; border-radius: 999px; font-weight: 700; font-size: 0.8rem;">100.0% PASSED</span>
+          </div>
+
+          <div class="qa-grid">
+            <div class="qa-item">
+              <div class="qa-icon-pass">✓</div>
+              <div class="qa-text">
+                <h4>Formula Injection Defense</h4>
+                <p>Leading '=', '+', '-', '@' sanitized across all worksheets. Zero Excel DDE command vulnerabilities.</p>
+              </div>
+            </div>
+            <div class="qa-item">
+              <div class="qa-icon-pass">✓</div>
+              <div class="qa-text">
+                <h4>Mathematical Identity Audit</h4>
+                <p>Recalculates sums, means, and category breakdowns independently; flags any ±0.01 mismatch.</p>
+              </div>
+            </div>
+            <div class="qa-item">
+              <div class="qa-icon-pass">✓</div>
+              <div class="qa-text">
+                <h4>Visual Chart Binary Check</h4>
+                <p>Verifies PNG binaries for valid PNG magic headers, dimension bounds, and non-empty file buffers.</p>
+              </div>
+            </div>
+            <div class="qa-item">
+              <div class="qa-icon-pass">✓</div>
+              <div class="qa-text">
+                <h4>XSS & Presentation Check</h4>
+                <p>HTML reports strictly escape user-provided column strings to prevent arbitrary markup injection.</p>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- Interactive ROI Calculator -->
+  <section id="calculator" class="container">
+    <div class="calc-box">
+      <div class="calc-grid">
+        <div>
+          <div class="section-tag">Value Calculator</div>
+          <h2 style="font-size: 1.8rem; font-weight: 800; color:#fff; margin-bottom: 12px;">Calculate Your Team's Monthly Time Recovery</h2>
+          <p style="color:var(--text-muted); font-size: 0.95rem; margin-bottom: 24px;">
+            Adjust the sliders to reflect your current monthly order volume and internal spreadsheet hours spent.
+          </p>
+
+          <div class="calc-slider-group">
+            <label>
+              <span>Monthly Order Volume:</span>
+              <strong id="order-val">5,000 orders</strong>
+            </label>
+            <input type="range" id="order-slider" min="500" max="50000" step="500" value="5000" oninput="updateCalc()">
+          </div>
+
+          <div class="calc-slider-group">
+            <label>
+              <span>Weekly Hours Spent on Manual Excel/CSVs:</span>
+              <strong id="hours-val">12 hours / week</strong>
+            </label>
+            <input type="range" id="hours-slider" min="2" max="40" step="1" value="12" oninput="updateCalc()">
+          </div>
+
+          <div class="calc-slider-group">
+            <label>
+              <span>Number of Sales Channels (Shopify, Amazon, Retail, Quick-Commerce):</span>
+              <strong id="channel-val">3 channels</strong>
+            </label>
+            <input type="range" id="channel-slider" min="1" max="6" step="1" value="3" oninput="updateCalc()">
+          </div>
+        </div>
+
+        <div>
+          <div class="calc-result-panel">
+            <div style="font-size: 0.85rem; color:var(--text-muted); text-transform: uppercase; font-weight: 600;">Recommended Solution</div>
+            <div class="calc-rec-tier" id="rec-tier">Tier 2: CSV Reconciliation Automation</div>
+            <div style="font-size: 0.9rem; color:#fff; margin-top: 4px;">Flat Fixed Investment: <strong id="rec-price">₹10,000</strong></div>
+
+            <div style="margin-top: 24px; border-top: 1px solid var(--border); padding-top: 18px;">
+              <div style="font-size: 0.85rem; color:var(--text-muted);">Estimated Monthly Hours Recovered</div>
+              <div class="calc-savings" id="rec-hours">48 Hours</div>
+              <div style="font-size: 0.85rem; color:var(--accent-emerald);" id="rec-cost-saved">Equivalent to saving ~₹36,000 in senior bandwidth</div>
+            </div>
+
+            <a href="#contact" class="cta-btn" style="width: 100%; justify-content: center; margin-top: 20px;">
+              Claim This Recommendation
+            </a>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- Contact & Pilot Booking -->
+  <section id="contact" class="container">
+    <div class="contact-card">
+      <h2>Book Your First ₹5,000 Data Pilot</h2>
+      <p>
+        Send us your raw anonymized CSV or order export. In 24 hours, receive the complete cleaned dataset, formula-verified Excel model, and executive HTML presentation with 0 upfront risk.
+      </p>
+
+      <div class="contact-methods">
+        <a href="mailto:bhaveshkhullar@example.com?subject=SOLOEARN%20Data%20Analytics%20Pilot%20Inquiry" class="cta-btn">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 4h16c1.1 0 2 .9 2 2v12c0 1.1-.9 2-2 2H4c-1.1 0-2-.9-2-2V6c0-1.1.9-2 2-2z"/><polyline points="22,6 12,13 2,6"/></svg>
+          Direct Email Inquiry
+        </a>
+        <a href="https://wa.me/919999999999?text=Hi%20Bhavesh,%20I'm%20interested%20in%20a%20data%20analytics%20and%20reconciliation%20pilot%20for%20our%20e-commerce%20store." target="_blank" class="cta-btn cta-btn-outline" style="border-color: #25D366; color: #25D366;">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor"><path d="M.057 24l1.687-6.163c-1.041-1.804-1.588-3.849-1.587-5.946.003-6.556 5.338-11.891 11.893-11.891 3.181.001 6.167 1.24 8.413 3.488 2.245 2.248 3.481 5.236 3.48 8.414-.003 6.557-5.338 11.892-11.893 11.892-1.99-.001-3.951-.5-5.688-1.448l-6.305 1.654zm6.597-3.807c1.676.995 3.276 1.591 5.392 1.592 5.448 0 9.886-4.434 9.889-9.885.002-5.462-4.415-9.89-9.881-9.892-5.452 0-9.887 4.434-9.889 9.884-.001 2.225.651 3.891 1.746 5.634l-.999 3.648 3.742-.981z"/></svg>
+          Chat on WhatsApp
+        </a>
+      </div>
+
+      <div style="font-size: 0.85rem; color: var(--text-muted); margin-top: 16px;">
+        Standard NDA provided prior to intake • Payments collected via official Kotak UPI QR (Mode 01)
+      </div>
+    </div>
+  </section>
+
+  <!-- Footer -->
+  <footer>
+    <div class="container">
+      <div class="footer-links">
+        <a href="#services">Services</a>
+        <a href="#demo">Preview</a>
+        <a href="#calculator">ROI Calculator</a>
+        <a href="#contact">Contact</a>
+      </div>
+      <p>© 2026 SOLOEARN Data Intelligence. Founded by Bhavesh Khullar. All rights reserved.</p>
+      <p style="font-size: 0.75rem; margin-top: 6px; color: #64748b;">
+        Local-first private operations architecture. No external cloud scraping. Fully compliant with RBI NPCI UPI Mode 01 standards.
+      </p>
+    </div>
+  </footer>
+
+  <script>
+    function switchSimTab(tabKey) {
+      document.querySelectorAll('.sim-tab-btn').forEach(btn => btn.classList.remove('active'));
+      document.querySelectorAll('.sim-view').forEach(view => view.classList.remove('active'));
+
+      event.currentTarget.classList.add('active');
+      document.getElementById('sim-' + tabKey).classList.add('active');
+    }
+
+    function updateCalc() {
+      const orders = parseInt(document.getElementById('order-slider').value);
+      const hours = parseInt(document.getElementById('hours-slider').value);
+      const channels = parseInt(document.getElementById('channel-slider').value);
+
+      document.getElementById('order-val').innerText = orders.toLocaleString() + ' orders';
+      document.getElementById('hours-val').innerText = hours + ' hours / week';
+      document.getElementById('channel-val').innerText = channels + ' channels';
+
+      const monthlyHours = hours * 4;
+      document.getElementById('rec-hours').innerText = monthlyHours + ' Hours';
+      document.getElementById('rec-cost-saved').innerText = 'Equivalent to saving ~₹' + (monthlyHours * 750).toLocaleString() + ' in senior bandwidth';
+
+      let tier = "Tier 1: Business Analytics & Excel Pack";
+      let price = "₹5,000";
+
+      if (channels >= 3 || orders > 10000) {
+        tier = "Tier 2: CSV Reconciliation Automation";
+        price = "₹10,000";
+      }
+      if (channels >= 4 && orders > 20000) {
+        tier = "Tier 4: Executive Interactive Dashboard";
+        price = "₹20,000";
+      }
+
+      document.getElementById('rec-tier').innerText = tier;
+      document.getElementById('rec-price').innerText = price;
+    }
+  </script>
+</body>
+</html>

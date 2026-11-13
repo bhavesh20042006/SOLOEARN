@@ -8,6 +8,8 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 load_dotenv(PROJECT_ROOT / ".env")
 
 DATA_DIR = PROJECT_ROOT / "data"
+LOGS_DIR = DATA_DIR / "logs"
+BACKUPS_DIR = DATA_DIR / "backups"
 WORKSPACES_DIR = PROJECT_ROOT / "workspaces"
 LEADS_DROPZONE_DIR = DATA_DIR / "leads_dropzone"
 UPI_QR_DIR = DATA_DIR / "upi_qr"
@@ -20,6 +22,8 @@ MAX_UPLOAD_MB = int(os.getenv("MAX_UPLOAD_MB", "25"))
 
 def ensure_directories() -> None:
     DATA_DIR.mkdir(parents=True, exist_ok=True)
+    LOGS_DIR.mkdir(parents=True, exist_ok=True)
+    BACKUPS_DIR.mkdir(parents=True, exist_ok=True)
     WORKSPACES_DIR.mkdir(parents=True, exist_ok=True)
     LEADS_DROPZONE_DIR.mkdir(parents=True, exist_ok=True)
     UPI_QR_DIR.mkdir(parents=True, exist_ok=True)

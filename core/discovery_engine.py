@@ -46,6 +46,13 @@ class DiscoveredLead:
     is_duplicate: bool = False
     is_suitable: bool = True
     rejection_reason: str = ""
+    profitability_passed: bool = True
+    hourly_yield_inr: float = 0.0
+    contribution_margin_pct: float = 0.0
+    company_name: str = ""
+    industry: str = ""
+    tech_stack: list[str] = field(default_factory=list)
+    pain_points: list[str] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -73,6 +80,135 @@ def compute_content_hash(title: str, description: str) -> str:
     """Computes a deterministic SHA-256 fingerprint for opportunity deduplication."""
     norm = f"{normalize_text(title)}|{normalize_text(description)}"
     return hashlib.sha256(norm.encode("utf-8")).hexdigest()
+
+
+TRACKING_QUERY_PARAMS: set[str] = {
+    "utm_source", "utm_medium", "utm_campaign", "utm_term", "utm_content",
+    "ref", "source", "fbclid", "gclid", "msclkid", "trk", "igshid", "mc_eid"
+}
+
+
+def normalize_url(raw_url: str) -> str:
+    """
+    Canonicalizes an HTTP(S) URL for robust deduplication across syndication feeds & dropzones.
+    Removes tracking parameters, normalizes lowercase scheme & host, removes www and default ports,
+    and strips trailing slashes.
+    """
+    if not raw_url or not isinstance(raw_url, str):
+        return ""
+    try:
+        parts = urlsplit(raw_url.strip())
+        if not parts.scheme or not parts.netloc:
+            return raw_url.strip()
+        scheme = parts.scheme.lower()
+        netloc = parts.netloc.lower()
+        if netloc.startswith("www."):
+            netloc = netloc[4:]
+        if (scheme == "http" and netloc.endswith(":80")) or (scheme == "https" and netloc.endswith(":443")):
+            netloc = netloc.rsplit(":", 1)[0]
+        path = parts.path.rstrip("/")
+        if not path:
+            path = "/"
+        
+        from urllib.parse import parse_qsl, urlencode, urlunsplit
+        clean_query = ""
+        if parts.query:
+            query_tuples = parse_qsl(parts.query, keep_blank_values=True)
+            filtered = [(k, v) for k, v in query_tuples if k.lower() not in TRACKING_QUERY_PARAMS]
+            if filtered:
+                clean_query = urlencode(sorted(filtered))
+        return urlunsplit((scheme, netloc, path, clean_query, ""))
+    except Exception:
+        return raw_url.strip()
+
+
+MINIMUM_ACCEPTABLE_CONTRIBUTION_MARGIN = 50.0  # 50% statutory threshold
+MINIMUM_HOURLY_YIELD_INR = 400.0  # ₹400 / hr net post-tax/post-cost threshold
+MINIMUM_VIABLE_PROJECT_PRICE_INR = 1500.0  # Minimum standard engagement
+MAX_ACCEPTABLE_RISK_LEVEL = 5.0
+
+EXPLOITATIVE_COMPENSATION_PATTERNS = [
+    r"\b(unpaid|unpaid test|free test|free work|unpaid trial)\b",
+    r"\b(exposure|equity only|commission only|profit share only|rev share only)\b",
+    r"\b(pay for test|test task unpaid)\b",
+]
+
+
+def screen_lead_profitability(
+    amount_inr: float,
+    estimated_hours: float,
+    risk_level: float,
+    payment_confidence: float,
+    is_suspicious: bool,
+    risk_flags: list[str],
+    overall_fit_score: float,
+    description: str = "",
+) -> tuple[bool, float, float, str]:
+    """
+    Evaluates unit economics, risk parameters, and profitability margins
+    before an opportunity or lead is qualified for outreach or execution.
+    Returns: (is_profitable, hourly_yield_inr, contribution_margin_pct, rejection_reason)
+    """
+    text = description.lower()
+
+    # 1. Check for exploitative or unpaid work patterns
+    for pat in EXPLOITATIVE_COMPENSATION_PATTERNS:
+        if re.search(pat, text):
+            return False, 0.0, 0.0, "Exploitative or unpaid compensation pattern detected"
+
+    # 2. Risk check: Filter out high-risk or suspicious leads immediately
+    if risk_level > MAX_ACCEPTABLE_RISK_LEVEL or is_suspicious:
+        flags_str = "; ".join(risk_flags[:2]) if risk_flags else "Risk score above limit"
+        return False, 0.0, 0.0, f"Excessive risk level ({risk_level}/10) or fraud indicators: {flags_str}"
+
+    hrs = max(0.5, float(estimated_hours))
+
+    # 3. If budget is specified (> 0)
+    if amount_inr > 0:
+        if amount_inr < MINIMUM_VIABLE_PROJECT_PRICE_INR:
+            rate = round(amount_inr / hrs, 2)
+            if rate < MINIMUM_HOURLY_YIELD_INR:
+                return (
+                    False,
+                    rate,
+                    round((amount_inr - 150) / amount_inr * 100, 1) if amount_inr > 150 else 0.0,
+                    f"Sub-threshold engagement budget (₹{amount_inr:,.0f} < ₹{MINIMUM_VIABLE_PROJECT_PRICE_INR:,.0f}) and low hourly rate (₹{rate:,.0f}/hr)",
+                )
+
+        platform_fee = round(amount_inr * 0.05, 2)
+        direct_cost = min(round(amount_inr * 0.05, 2), 250.0)
+        net_pretax = round(amount_inr - platform_fee - direct_cost, 2)
+        margin_pct = round((net_pretax / amount_inr) * 100.0, 1) if amount_inr > 0 else 0.0
+
+        # Estimated post-tax under Indian Income-tax Act (presumptive 44ADA / normal slab reserve)
+        est_tax = round(net_pretax * 0.15, 2)
+        net_profit = round(net_pretax - est_tax, 2)
+        yield_hr = round(net_profit / hrs, 2)
+
+        if margin_pct < MINIMUM_ACCEPTABLE_CONTRIBUTION_MARGIN:
+            return (
+                False,
+                yield_hr,
+                margin_pct,
+                f"Contribution margin ({margin_pct}%) falls below {MINIMUM_ACCEPTABLE_CONTRIBUTION_MARGIN}% profitability threshold",
+            )
+
+        if yield_hr < MINIMUM_HOURLY_YIELD_INR:
+            return (
+                False,
+                yield_hr,
+                margin_pct,
+                f"Net owner hourly yield (₹{yield_hr:,.0f}/hr) falls below ₹{MINIMUM_HOURLY_YIELD_INR:,.0f}/hr threshold",
+            )
+
+        return True, yield_hr, margin_pct, ""
+
+    # 4. If budget is unspecified (0.0):
+    # Inbound discovery opportunities with unknown budget are allowed only if overall fit is sufficient and risk is low.
+    if overall_fit_score < 0.40:
+        return False, 0.0, 0.0, "Unspecified budget with low capability fit score (< 0.40)"
+
+    return True, 0.0, 0.0, ""
 
 
 def extract_budget_inr(text: str) -> float:

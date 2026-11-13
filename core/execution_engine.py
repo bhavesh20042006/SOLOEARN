@@ -60,7 +60,7 @@ def generate_execution_plan(
         PlanStep(
             step_id=1,
             name="Input Ingestion & Validation",
-            description=f"Validate CSV input file '{filename}', check byte boundaries and verify tabular consistency.",
+            description=f"Validate tabular input file '{filename}', detect multi-encoding (utf-8, utf-8-sig, cp1252, latin-1), gracefully skip corrupt rows, and stream in-memory chunks.",
             expected_output="Validated in-memory dataset",
         ),
         PlanStep(
@@ -78,7 +78,7 @@ def generate_execution_plan(
         PlanStep(
             step_id=4,
             name="Spreadsheet Compilation",
-            description="Generate formatted Excel workbook with Cleaned Data, Data Quality, and Numeric Summary sheets.",
+            description="Generate formatted openpyxl workbook with Executive Summary, KPI cards, Cleaned Data, Data Quality, and Numeric Summary sheets.",
             expected_output="business_analysis.xlsx",
         ),
         PlanStep(
@@ -90,7 +90,7 @@ def generate_execution_plan(
         PlanStep(
             step_id=6,
             name="Client Presentation & Executive Report",
-            description="Synthesize insights and produce a standalone responsive HTML presentation with KPI summary cards.",
+            description="Synthesize insights and produce an accelerated responsive HTML presentation with KPI summary cards and interactive explorer.",
             expected_output="report.html & insights.txt",
         ),
         PlanStep(

@@ -7,7 +7,7 @@ import math
 import re
 import zipfile
 from pathlib import Path, PurePosixPath, PureWindowsPath
-from typing import Any
+from typing import Any, Generator
 
 import pandas as pd
 
@@ -116,20 +116,206 @@ def package_deliverables_zip(workspace: Path, allowed_filenames: list[str]) -> P
     return zip_path
 
 
-def _read_csv_strict(file_bytes: bytes, source_name: str) -> pd.DataFrame:
+def detect_encoding(raw_bytes: bytes) -> str:
+    """
+    Robust multi-encoding detection supporting UTF-8 BOM, UTF-16, UTF-8, CP1252, Latin-1, and ISO-8859-1.
+    """
+    if not raw_bytes:
+        return "utf-8"
+    if raw_bytes.startswith(b"\xef\xbb\xbf"):
+        return "utf-8-sig"
+    if raw_bytes.startswith(b"\xff\xfe"):
+        return "utf-16-le"
+    if raw_bytes.startswith(b"\xfe\xff"):
+        return "utf-16-be"
+    sample = raw_bytes[:131072]
+    try:
+        sample.decode("utf-8")
+        return "utf-8"
+    except UnicodeDecodeError:
+        pass
+    try:
+        import charset_normalizer
+        matches = charset_normalizer.from_bytes(sample)
+        best = matches.best()
+        if best and best.encoding:
+            cand = best.encoding.lower()
+            try:
+                sample.decode(cand)
+                return cand
+            except (UnicodeDecodeError, LookupError):
+                pass
+    except Exception:
+        pass
+    for cand in ("utf-8-sig", "cp1252", "latin-1", "iso-8859-1"):
+        try:
+            sample.decode(cand)
+            return cand
+        except (UnicodeDecodeError, LookupError):
+            continue
+    return "latin-1"
+
+
+def is_excel_file(filename: str, raw_bytes: bytes = b"") -> bool:
+    """Determine whether the input file is an Excel workbook (.xlsx, .xlsm, .xls)."""
+    name = str(filename).lower()
+    if name.endswith((".xlsx", ".xlsm", ".xltx", ".xltm", ".xls")):
+        return True
+    if len(raw_bytes) >= 8:
+        if raw_bytes.startswith(b"PK\x03\x04"):
+            return True
+        if raw_bytes.startswith(b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1"):
+            return True
+    return False
+
+
+def stream_excel_chunks(
+    file_bytes: bytes,
+    chunksize: int = 10_000,
+    max_rows: int = 250_000,
+) -> Generator[pd.DataFrame, None, None]:
+    """
+    Stream Excel rows in memory-efficient chunks using openpyxl read_only iterator.
+    Does not build full XML DOM in memory.
+    """
+    import openpyxl
+    wb = openpyxl.load_workbook(io.BytesIO(file_bytes), read_only=True, data_only=True)
+    try:
+        ws = wb.active
+        rows_iter = ws.iter_rows(values_only=True)
+        header = None
+        for row in rows_iter:
+            if row and any(cell is not None and str(cell).strip() != "" for cell in row):
+                header = [
+                    str(c).strip() if c is not None and str(c).strip() != "" else f"col_{idx}"
+                    for idx, c in enumerate(row, 1)
+                ]
+                break
+        if not header:
+            return
+        
+        chunk: list[list[Any]] = []
+        total_rows = 0
+        for row in rows_iter:
+            if not row or not any(cell is not None and str(cell).strip() != "" for cell in row):
+                continue
+            chunk.append(list(row[:len(header)]))
+            total_rows += 1
+            if len(chunk) >= chunksize:
+                yield pd.DataFrame(chunk, columns=header)
+                chunk = []
+            if total_rows >= max_rows:
+                break
+        if chunk:
+            yield pd.DataFrame(chunk, columns=header)
+    finally:
+        wb.close()
+
+
+def stream_csv_chunks(
+    file_bytes: bytes,
+    source_name: str,
+    chunksize: int = 10_000,
+    max_rows: int = 250_000,
+    encoding: str | None = None,
+) -> Generator[pd.DataFrame, None, None]:
+    """
+    Stream CSV rows in chunks with multi-encoding fallback and graceful skipping of corrupt rows.
+    """
+    clean_bytes = file_bytes.replace(b"\x00", b"")
+    enc = encoding or detect_encoding(clean_bytes)
+    
+    try:
+        reader = pd.read_csv(
+            io.BytesIO(clean_bytes),
+            chunksize=chunksize,
+            encoding=enc,
+            on_bad_lines="skip",
+            low_memory=True,
+        )
+        total_rows = 0
+        for chunk in reader:
+            total_rows += len(chunk)
+            yield chunk
+            if total_rows >= max_rows:
+                break
+    except Exception:
+        # Fallback to python engine with on_bad_lines='skip'
+        reader = pd.read_csv(
+            io.BytesIO(clean_bytes),
+            chunksize=chunksize,
+            encoding=enc,
+            engine="python",
+            on_bad_lines="skip",
+        )
+        total_rows = 0
+        for chunk in reader:
+            total_rows += len(chunk)
+            yield chunk
+            if total_rows >= max_rows:
+                break
+
+
+def read_tabular_dataset_streamed(
+    file_bytes: bytes,
+    source_name: str,
+    max_rows: int = 250_000,
+    chunksize: int = 10_000,
+) -> tuple[pd.DataFrame, dict[str, Any]]:
+    """
+    Read tabular data (CSV or Excel) memory-efficiently in chunks,
+    with multi-encoding detection, corrupt row skipping, and numeric downcasting.
+    """
     if not isinstance(file_bytes, (bytes, bytearray)) or not file_bytes:
         raise ValueError("A non-empty CSV file is required; no sample data will be substituted.")
     max_bytes = MAX_UPLOAD_MB * 1024 * 1024
     if len(file_bytes) > max_bytes:
         raise ValueError(f"Input file exceeds the configured {MAX_UPLOAD_MB} MB upload limit")
+    
+    is_excel = is_excel_file(source_name, file_bytes)
+    chunks: list[pd.DataFrame] = []
+    enc = "binary" if is_excel else detect_encoding(file_bytes)
+    
     try:
-        df = pd.read_csv(io.BytesIO(bytes(file_bytes)))
+        if is_excel:
+            chunk_gen = stream_excel_chunks(file_bytes, chunksize=chunksize, max_rows=max_rows)
+        else:
+            chunk_gen = stream_csv_chunks(file_bytes, source_name, chunksize=chunksize, max_rows=max_rows, encoding=enc)
+        
+        for chunk in chunk_gen:
+            if not chunk.empty:
+                for col in chunk.select_dtypes(include=["float64"]).columns:
+                    chunk[col] = pd.to_numeric(chunk[col], downcast="float")
+                for col in chunk.select_dtypes(include=["int64"]).columns:
+                    chunk[col] = pd.to_numeric(chunk[col], downcast="integer")
+                chunks.append(chunk)
     except Exception as exc:
         raise ValueError(f"Could not parse input CSV '{Path(source_name).name}': {exc}") from exc
+
+    if not chunks:
+        raise ValueError("The supplied CSV contains no data rows or columns.")
+    
+    df = pd.concat(chunks, ignore_index=True)
     if df.empty or len(df.columns) == 0:
         raise ValueError("The supplied CSV contains no data rows or columns.")
-    if len(df) > 250_000:
-        raise ValueError("For this laptop MVP, limit each CSV to 250,000 rows")
+    if len(df) > max_rows:
+        raise ValueError(f"For this laptop MVP, limit each CSV to {max_rows:,} rows")
+    
+    mem_bytes = int(df.memory_usage(deep=True).sum())
+    mem_mb = round(mem_bytes / (1024 * 1024), 4)
+    meta = {
+        "format": "excel" if is_excel else "csv",
+        "encoding": enc,
+        "rows": len(df),
+        "columns": len(df.columns),
+        "memory_mb": mem_mb,
+        "memory_bytes": mem_bytes,
+    }
+    return df, meta
+
+
+def _read_csv_strict(file_bytes: bytes, source_name: str) -> pd.DataFrame:
+    df, _ = read_tabular_dataset_streamed(file_bytes, source_name)
     return df
 
 
@@ -226,7 +412,20 @@ def run_pipeline(input_path: str = DEFAULT_INPUT, output_path: str = "cleaned_da
     if not source.is_file():
         logging.error("Input file not found: %s", source)
         return 1
-    df = pd.read_csv(source)
+    chunks = []
+    for enc in ("utf-8", "utf-8-sig", "cp1252", "latin-1"):
+        try:
+            reader = pd.read_csv(source, encoding=enc, chunksize=10000, on_bad_lines="skip", low_memory=True)
+            for ch in reader:
+                chunks.append(ch)
+            break
+        except Exception:
+            chunks = []
+            continue
+    if not chunks:
+        df = pd.read_csv(source)
+    else:
+        df = pd.concat(chunks, ignore_index=True)
     if df.empty or len(df.columns) == 0:
         raise ValueError("Input CSV contains no rows or columns")
     initial_rows = len(df)
@@ -321,12 +520,14 @@ def execute_dashboard_development_service(workspace: Path, file_bytes: bytes, fi
     }
     safe_relative_write(workspace, "kpi_metrics.json", json.dumps(kpis, indent=2, allow_nan=False))
 
-    esc = lambda value: html.escape(str(value), quote=True)
-    table_headers = "".join(f"<th>{esc(c)}</th>" for c in df.columns[:8])
-    table_rows: list[str] = []
-    for _, row in df.head(50).iterrows():
-        cells = "".join(f"<td>{esc(row[c])}</td>" for c in df.columns[:8])
-        table_rows.append(f"<tr>{cells}</tr>")
+    esc = lambda value: html.escape(str(value) if value is not None else "", quote=True)
+    display_cols = list(df.columns[:8])
+    table_headers = "".join(f"<th>{esc(c)}</th>" for c in display_cols)
+    sub_df = df[display_cols].head(50)
+    table_rows = [
+        "<tr>" + "".join(f"<td>{esc(val)}</td>" for val in row) + "</tr>"
+        for row in sub_df.itertuples(index=False)
+    ]
     table_body = "".join(table_rows)
     safe_metric = esc(primary_metric)
     safe_filename = esc(display_name)
@@ -343,23 +544,25 @@ body {{ font-family:Arial,sans-serif;background:var(--bg-primary);color:var(--te
 header {{ display:flex;justify-content:space-between;align-items:flex-start;border-bottom:1px solid var(--border);padding-bottom:16px;margin-bottom:24px; }}
 .grid {{ display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:16px;margin-bottom:24px; }}
 .card {{ background:var(--bg-card);border:1px solid var(--border);border-radius:12px;padding:20px; }}
-.label {{ color:var(--text-secondary);font-size:12px;text-transform:uppercase; }}
-.value {{ font-size:27px;font-weight:700;margin-top:8px; }}
+.label {{ color:var(--text-secondary);font-size:12px;text-transform:uppercase;letter-spacing:0.05em; }}
+.value {{ font-size:27px;font-weight:700;margin-top:8px;color:#f8fafc; }}
+.sub {{ font-size:12px;color:var(--text-secondary);margin-top:4px; }}
 input {{ width:100%;box-sizing:border-box;padding:12px;border-radius:8px;margin:12px 0;background:#0f172a;color:#fff;border:1px solid var(--border); }}
 table {{ width:100%;border-collapse:collapse; }}
 th,td {{ text-align:left;padding:9px;border-bottom:1px solid var(--border);overflow-wrap:anywhere; }}
+th {{ background:#0f172a;position:sticky;top:0; }}
 </style>
 </head>
 <body><main class="container">
-<header><div><h1>Interactive Executive Dashboard</h1><p>Source: {safe_filename} · Generated from supplied CSV</p></div><span>SOLOEARN</span></header>
+<header><div><h1>Interactive Executive Dashboard</h1><p>Source: {safe_filename} · High-Efficiency Tabular Delivery Pipeline</p></div><span>SOLOEARN</span></header>
 <section class="grid">
-<div class="card"><div class="label">Total records</div><div class="value">{len(df):,}</div></div>
-<div class="card"><div class="label">Total {safe_metric}</div><div class="value">{metric_sum:,.2f}</div></div>
-<div class="card"><div class="label">Average {safe_metric}</div><div class="value">{metric_avg:,.2f}</div></div>
-<div class="card"><div class="label">Columns</div><div class="value">{len(df.columns)}</div></div>
+<div class="card"><div class="label">Total records</div><div class="value">{len(df):,}</div><div class="sub">Verified rows</div></div>
+<div class="card"><div class="label">Total {safe_metric}</div><div class="value">{metric_sum:,.2f}</div><div class="sub">Aggregate volume</div></div>
+<div class="card"><div class="label">Average {safe_metric}</div><div class="value">{metric_avg:,.2f}</div><div class="sub">Arithmetic mean</div></div>
+<div class="card"><div class="label">Columns</div><div class="value">{len(df.columns)}</div><div class="sub">Attributes analyzed</div></div>
 </section>
 <section class="card"><h2>Data explorer (first 50 rows)</h2><label for="searchInput">Filter rows</label><input id="searchInput" type="search" oninput="filterTable()" placeholder="Search visible rows">
-<div style="overflow-x:auto"><table id="dataTable"><thead><tr>{table_headers}</tr></thead><tbody>{table_body}</tbody></table></div></section>
+<div style="overflow-x:auto;max-height:600px"><table id="dataTable"><thead><tr>{table_headers}</tr></thead><tbody>{table_body}</tbody></table></div></section>
 </main>
 <script>
 function filterTable() {{
@@ -446,7 +649,20 @@ def run_automation(input_path: str, output_path: str, summary_path: str = "autom
     source = Path(input_path)
     if not source.is_file():
         raise FileNotFoundError(f"Input CSV not found: {source}")
-    frame = pd.read_csv(source)
+    chunks = []
+    for enc in ("utf-8", "utf-8-sig", "cp1252", "latin-1"):
+        try:
+            reader = pd.read_csv(source, encoding=enc, chunksize=10000, on_bad_lines="skip", low_memory=True)
+            for ch in reader:
+                chunks.append(ch)
+            break
+        except Exception:
+            chunks = []
+            continue
+    if not chunks:
+        frame = pd.read_csv(source)
+    else:
+        frame = pd.concat(chunks, ignore_index=True)
     if frame.empty or len(frame.columns) == 0:
         raise ValueError("Input CSV has no data rows or columns")
     input_rows = len(frame)

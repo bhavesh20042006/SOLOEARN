@@ -2,7 +2,7 @@
 
 A local-first, profit-optimized private operations engine for B2B analytics and business process automation. SOLOEARN couples deterministic service delivery workflows with **FRIDAY**—an autonomous AI agent core governed by a strict, fail-closed permission nervous system.
 
-> **Commercial Reality Notice:** All software engineering benchmarks and architectural capability proofs in this repository have passed automated testing (241 passed, 2 skipped across 243 discovered tests; 25/25 in FRIDAY Agent Core test suite; 7/7 local preflight checks). However, software tests do **not** constitute realized business income. The live commercial ledger remains at `paying_customers: 0, revenue: ₹0.00, customer_advances: ₹0.00`. Realizing revenue requires completing the 9 real-world onboarding steps (Kotak Safalta Current Account, Kotak.biz merchant activation, and live client acquisition).
+> **Commercial Reality Notice:** All software engineering benchmarks and architectural capability proofs in this repository have passed automated testing (316 passed, 2 skipped across 318 discovered tests; 25/25 in FRIDAY Agent Core test suite; 44/44 in Banking & UPI Ledger suite; 15/15 in QA expansion suite; 13/13 in WAL concurrency suite; 8/8 in Security audit suite; 8/8 in Data Delivery suite; 7/7 local preflight checks). However, software tests do **not** constitute realized business income. The live commercial ledger remains at `paying_customers: 0, revenue: ₹0.00, customer_advances: ₹0.00`. Realizing revenue requires completing the 9 real-world onboarding steps (Kotak Safalta Current Account, Kotak.biz merchant activation, and live client acquisition).
 
 ---
 
@@ -79,10 +79,10 @@ python -m unittest discover -s tests
 python scripts/run_m7_local_preflight.py
 ```
 
-### Archive Checksum (M8.0.3 Production Integrity Release)
-- Archive: `SOLOEARN_Friday_Agent_Core_Ready.zip` (336,785 bytes)
-- Base64 ASCII: `SOLOEARN_Friday_Agent_Core_Ready.zip.b64.txt` (449,048 chars)
-- **SHA256**: `ABAD4DD2EE6CDB6741CBEA53E12DB774D2D17DBC87D56FFCC47F2B8F87EF8E78`
+### Archive Checksum (M8.0.4 Enterprise Hardening & Concurrency Release)
+- Archive: `SOLOEARN_Friday_Agent_Core_Ready.zip` (665,414 bytes)
+- Base64 ASCII: `SOLOEARN_Friday_Agent_Core_Ready.zip.b64.txt` (887,220 chars)
+- **SHA256**: `44C385E1BA4012DD0F1E04D0A73C8E7596CFD9F34A7AEA63F0A5D431F0F8C4C4`
 
 ### M8.0.3 Production Integrity Corrections
 Following independent static code auditing and regression testing of FRIDAY M8.0.2 on GitHub, 7 key integrity defect areas were resolved and verified across 16 mandatory regression tests (Tests 10–25 in `tests.test_friday_agent_core`):

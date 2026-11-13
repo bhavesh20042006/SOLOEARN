@@ -1,0 +1,28 @@
+version: "3.9"
+
+services:
+  soloearn:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: soloearn-app
+    ports:
+      - "8501:8501"
+    volumes:
+      - soloearn-data:/app/data
+    env_file:
+      - .env
+    environment:
+      - STREAMLIT_SERVER_PORT=8501
+      - STREAMLIT_SERVER_HEADLESS=true
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8501/_stcore/health')"]
+      interval: 30s
+      timeout: 10s
+      start_period: 15s
+      retries: 3
+
+volumes:
+  soloearn-data:
+    driver: local

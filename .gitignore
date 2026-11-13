@@ -12,5 +12,7 @@ data/invoices/*
 !data/invoices/.gitkeep
 data/upi_qr/*
 !data/upi_qr/.gitkeep
+data/logs/
+data/daemon_health.json
 *.zip
 .DS_Store

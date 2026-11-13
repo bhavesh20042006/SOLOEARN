@@ -5,11 +5,13 @@ FRIDAY Secure Client Portal & Webhook Ingestion Rail
 Implements OWASP-compliant authenticated file intake and HMAC-signed payment webhook processing.
 
 Security Architecture:
-- Token-authenticated client upload access.
-- Strict extension and MIME validation (.csv, .xlsx, .tsv, .txt).
-- Formula injection protection (strips leading '=', '+', '-', '@').
-- Isolated workspace storage with randomized UUID filenames.
-- HMAC-SHA256 signed payment webhook validation with idempotency tables.
+- Token-authenticated client upload access with high entropy (secrets.token_urlsafe(32)).
+- OWASP-compliant file sanitization against path traversal (CWE-22) and executable uploads (CWE-434).
+- CSV DDE formula injection protection (CWE-1236 with '=', '+', '-', '@', '\\t', '\\r').
+- Isolated workspace storage with randomized UUID filenames and boundary confinement checks.
+- Timing-attack-resistant HMAC-SHA256 signature checks (hmac.compare_digest).
+- Parameterized SQLite queries across all operations to eliminate SQL injection risks.
+- Redaction of secret tokens in exception traces and structured logs.
 """
 
 import csv
@@ -21,6 +23,7 @@ import logging
 import math
 import os
 import re
+import secrets
 import sqlite3
 import time
 import uuid
@@ -33,12 +36,31 @@ from core.analytics import sanitize_cell_value
 from core.config import DATA_DIR, MAX_UPLOAD_MB, safe_workspace_path
 from core.db import connect, get_invoice, get_task, update_task_status, utc_now
 from core.financial_ledger import inr_to_paise
+from core.secrets_manager import mask_secret
 from core.upi_engine import process_merchant_bank_webhook
 
 logger = logging.getLogger("soloearn.friday.portal")
 
 ALLOWED_EXTENSIONS = {".csv", ".xlsx", ".tsv", ".txt"}
 MAX_BYTES = MAX_UPLOAD_MB * 1024 * 1024  # 25 MB default
+
+# Forbidden executable extensions defending against CWE-434 (including double extensions)
+FORBIDDEN_EXTENSIONS = {
+    ".exe", ".dll", ".so", ".bin", ".com", ".bat", ".cmd", ".ps1", ".vbs",
+    ".sh", ".bash", ".py", ".pl", ".php", ".phtml", ".jsp", ".asp", ".aspx",
+    ".cgi", ".jar", ".msi", ".scr", ".pif", ".hta", ".cpl", ".msc", ".wsf",
+}
+
+# Executable binary payload signatures (magic bytes)
+EXECUTABLE_MAGIC_BYTES = (
+    b"MZ",              # DOS/PE Executable (exe, dll)
+    b"\x7fELF",         # Linux Executable (ELF)
+    b"\xca\xfe\xba\xbe",# Mach-O Fat / Java Class
+    b"\xfe\xed\xfa\xce",# Mach-O 32-bit
+    b"\xfe\xed\xfa\xcf",# Mach-O 64-bit
+    b"\xce\xfa\xed\xfe",# Mach-O 32-bit (reverse)
+    b"\xcf\xfa\xed\xfe",# Mach-O 64-bit (reverse)
+)
 
 
 def init_portal_tables() -> None:
@@ -135,7 +157,7 @@ class FridaySecurePortal:
         validity_hours: int = 24,
     ) -> str:
         """Generates a secure, cryptographically random upload token with genuine 24h expiration."""
-        token = f"tok_{uuid.uuid4().hex}"
+        token = f"tok_{secrets.token_urlsafe(32)}"
         now_dt = datetime.now(timezone.utc)
         now = now_dt.isoformat()
         expires = (now_dt + timedelta(hours=validity_hours)).isoformat()
@@ -162,24 +184,54 @@ class FridaySecurePortal:
         Validates uploaded file against security criteria, enforces expiration and atomic single-use,
         and stores it in the client's isolated workspace.
         """
-        if not token:
+        if not token or not isinstance(token, str):
             raise ValueError("Authentication token required for portal upload")
 
-        # 1. Size constraint
+        clean_token = token.strip()
+        if not clean_token:
+            raise ValueError("Authentication token required for portal upload")
+
+        # 1. Path traversal defense on original filename (CWE-22)
+        if not filename or not isinstance(filename, str):
+            raise ValueError("Valid filename required for portal upload")
+        if "\x00" in filename:
+            raise ValueError("Null bytes detected in filename (CWE-22 / CWE-434)")
+
+        norm_filename = filename.replace("\\", "/")
+        sanitized_filename = Path(norm_filename).name.strip()
+        if not sanitized_filename or sanitized_filename in (".", "..") or ".." in Path(norm_filename).parts:
+            raise ValueError(f"Path traversal sequence detected in filename '{filename}' (CWE-22)")
+
+        # 2. Size constraint
         if len(file_bytes) == 0:
             raise ValueError("Uploaded file is empty (0 bytes)")
         if len(file_bytes) > MAX_BYTES:
             raise ValueError(f"File size ({len(file_bytes)} bytes) exceeds maximum allowed {MAX_UPLOAD_MB} MB")
 
-        # 2. Extension check
-        ext = Path(filename).suffix.lower()
+        # 3. Extension check & executable prevention (CWE-434)
+        ext = Path(sanitized_filename).suffix.lower()
         if ext not in ALLOWED_EXTENSIONS:
             raise ValueError(f"File extension '{ext}' is forbidden. Allowed: {sorted(ALLOWED_EXTENSIONS)}")
+
+        # Check all suffixes for forbidden executable extensions (e.g. malicious.exe.csv, shell.sh.txt)
+        all_suffixes = [s.lower() for s in Path(sanitized_filename).suffixes]
+        for s in all_suffixes:
+            if s in FORBIDDEN_EXTENSIONS:
+                raise ValueError(f"Forbidden executable file extension '{s}' in filename (CWE-434)")
+
+        # Inspect binary magic bytes for executable formats (CWE-434)
+        if any(file_bytes.startswith(magic) for magic in EXECUTABLE_MAGIC_BYTES):
+            raise ValueError("Executable binary payload detected in uploaded file (CWE-434)")
+
+        # Inspect script interpreter headers (shebang or web script tags)
+        stripped_bytes = file_bytes.lstrip()
+        if stripped_bytes.startswith((b"#!", b"<?php", b"<script", b"<%")):
+            raise ValueError("Executable script content detected in uploaded file (CWE-434)")
 
         now_dt = datetime.now(timezone.utc)
         now = now_dt.isoformat()
 
-        # Atomic token claim under serialized transaction (prevents concurrent double-use)
+        # 4. Atomic token claim under serialized transaction (prevents concurrent double-use)
         with connect() as conn:
             conn.execute("BEGIN IMMEDIATE")
             cur = conn.execute(
@@ -188,31 +240,29 @@ class FridaySecurePortal:
                 SET is_used = 1, used_at = ?
                 WHERE token = ? AND is_used = 0 AND expires_at > ? AND is_sandbox = ?
                 """,
-                (now, token, now, int(self.is_sandbox)),
+                (now, clean_token, now, int(self.is_sandbox)),
             )
             if cur.rowcount == 0:
                 row = conn.execute(
                     "SELECT is_used, expires_at FROM friday_portal_tokens WHERE token = ? AND is_sandbox = ?",
-                    (token, int(self.is_sandbox)),
+                    (clean_token, int(self.is_sandbox)),
                 ).fetchone()
                 if not row:
                     raise ValueError("Invalid or unrecognized client upload token")
                 if bool(row["is_used"]):
-                    raise ValueError(f"Upload token '{token}' has already been used. Each portal token is strictly single-use.")
+                    raise ValueError(f"Upload token '{mask_secret(clean_token)}' has already been used. Each portal token is strictly single-use.")
                 if row["expires_at"] <= now:
-                    raise ValueError(f"Upload token '{token}' expired at {row['expires_at']}. Please request a fresh link.")
+                    raise ValueError(f"Upload token '{mask_secret(clean_token)}' expired at {row['expires_at']}. Please request a fresh link.")
                 raise ValueError("Upload token could not be claimed.")
 
             token_row = conn.execute(
                 "SELECT * FROM friday_portal_tokens WHERE token = ? AND is_sandbox = ?",
-                (token, int(self.is_sandbox)),
+                (clean_token, int(self.is_sandbox)),
             ).fetchone()
             conn.commit()
 
-        # 3. Path traversal defense & UUID file naming
-        clean_name = f"upload_{uuid.uuid4().hex[:12]}{ext}"
-
-        # 4. Workspace resolution
+        # 5. Randomized safe storage naming & workspace resolution
+        clean_name = f"upload_{secrets.token_hex(8)}{ext}"
         task_id = token_row["task_id"]
         if task_id:
             ws_path = safe_workspace_path(f"task_{task_id:04d}") / "uploads"
@@ -220,9 +270,11 @@ class FridaySecurePortal:
             ws_path = safe_workspace_path("portal_dropzone")
 
         ws_path.mkdir(parents=True, exist_ok=True)
-        dest_path = ws_path / clean_name
+        dest_path = (ws_path / clean_name).resolve()
+        if not dest_path.is_relative_to(ws_path.resolve()):
+            raise ValueError("Path traversal attempt in destination path (CWE-22)")
 
-        # 5. Content Sanitization for CSV/Text files against Formula Injection
+        # 6. Content Sanitization for CSV/Text files against Formula Injection (CWE-1236)
         # Uses python's csv library to preserve embedded commas, quotes, and legitimate negative numbers
         if ext in {".csv", ".tsv", ".txt"}:
             try:
@@ -231,13 +283,16 @@ class FridaySecurePortal:
                 decoded_text = file_bytes.decode("latin-1", errors="replace")
 
             delimiter = "\t" if ext == ".tsv" else ","
-            reader = csv.reader(io.StringIO(decoded_text), delimiter=delimiter)
-            out_str = io.StringIO()
+            reader = csv.reader(io.StringIO(decoded_text, newline=""), delimiter=delimiter)
+            out_str = io.StringIO(newline="")
             writer = csv.writer(out_str, delimiter=delimiter, lineterminator="\n")
-            for row in reader:
-                clean_row = [sanitize_cell_value(c) for c in row]
-                writer.writerow(clean_row)
-            dest_path.write_text(out_str.getvalue(), encoding="utf-8")
+            try:
+                for row in reader:
+                    clean_row = [sanitize_cell_value(c) for c in row]
+                    writer.writerow(clean_row)
+                dest_path.write_text(out_str.getvalue(), encoding="utf-8")
+            except csv.Error as err:
+                raise ValueError(f"Malformed CSV/tabular data rejected (CWE-1236): {err}")
         else:
             dest_path.write_bytes(file_bytes)
 
@@ -253,14 +308,14 @@ class FridaySecurePortal:
                 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
-                    token,
+                    clean_token,
                     token_row["client_name"],
                     token_row["opportunity_id"],
                     token_row["task_id"],
                     str(dest_path),
                     file_sha256,
                     len(file_bytes),
-                    filename,
+                    sanitized_filename,
                     int(self.is_sandbox),
                     now,
                 ),
@@ -269,7 +324,7 @@ class FridaySecurePortal:
 
         return {
             "status": "ingested",
-            "original_filename": filename,
+            "original_filename": sanitized_filename,
             "stored_filename": clean_name,
             "file_path": str(dest_path),
             "file_sha256": file_sha256,
@@ -305,8 +360,14 @@ class FridayPaymentWebhookHandler:
             self.webhook_secret = webhook_secret or self.DEFAULT_TEST_SECRET
 
     def verify_hmac_signature(self, payload_bytes: bytes, signature: str) -> bool:
-        if not self.webhook_secret or not signature:
+        """Strict constant-time HMAC-SHA256 signature verification (timing attack defense)."""
+        if not self.webhook_secret or not signature or not isinstance(signature, str):
             return False
+        if not isinstance(payload_bytes, (bytes, bytearray)):
+            if isinstance(payload_bytes, str):
+                payload_bytes = payload_bytes.encode("utf-8")
+            else:
+                return False
         expected = hmac.new(self.webhook_secret.encode("utf-8"), payload_bytes, hashlib.sha256).hexdigest()
         return hmac.compare_digest(expected.lower(), signature.strip().lower())
 
@@ -342,7 +403,7 @@ class FridayPaymentWebhookHandler:
         if not event_id_clean:
             raise ValueError("Missing required event_id in webhook call.")
 
-        # 1. Verify HMAC Signature
+        # 1. Verify HMAC Signature strictly with hmac.compare_digest
         if not self.verify_hmac_signature(payload_bytes, signature):
             raise ValueError("Invalid webhook HMAC signature: event rejected for security.")
 
@@ -449,10 +510,10 @@ class FridayPaymentWebhookHandler:
                     f"Duplicate transaction reference: Bank reference '{txn_ref}' has already been processed in this environment."
                 )
 
-            # Also check financial_transactions ledger for duplicate UTR
+            # Also check financial_transactions ledger for duplicate UTR using exact substring match (no LIKE wildcard injection)
             existing_txn = conn.execute(
-                "SELECT id, reference_id FROM financial_transactions WHERE description LIKE ? AND is_sandbox = ? AND is_reversal = 0",
-                (f"%Ref: {txn_ref}%", int(self.is_sandbox)),
+                "SELECT id, reference_id FROM financial_transactions WHERE instr(description, ?) > 0 AND is_sandbox = ? AND is_reversal = 0",
+                (f"Ref: {txn_ref}", int(self.is_sandbox)),
             ).fetchone()
             if existing_txn:
                 conn.rollback()

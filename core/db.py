@@ -1,13 +1,25 @@
 from __future__ import annotations
 
 import math
+import random
 import sqlite3
+import time
 from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
-from typing import Any, Generator
+from typing import Any, Callable, Generator, TypeVar
+
+T = TypeVar("T")
 
 import core.config
 from core.config import ensure_directories
+from core.db_maintenance import (
+    DatabaseMaintenanceManager,
+    backup_database,
+    check_database_integrity,
+    checkpoint_wal,
+    get_database_stats,
+    vacuum_database,
+)
 
 
 def utc_now() -> str:
@@ -15,14 +27,15 @@ def utc_now() -> str:
 
 
 @contextmanager
-def connect() -> Generator[sqlite3.Connection, None, None]:
+def connect(timeout: float = 60.0) -> Generator[sqlite3.Connection, None, None]:
     ensure_directories()
-    conn = sqlite3.connect(core.config.DB_PATH, timeout=30.0)
+    conn = sqlite3.connect(core.config.DB_PATH, timeout=timeout)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA foreign_keys = ON")
     conn.execute("PRAGMA journal_mode = WAL")
-    conn.execute("PRAGMA busy_timeout = 5000")
+    conn.execute("PRAGMA busy_timeout = 60000")
     conn.execute("PRAGMA synchronous = NORMAL")
+    conn.execute("PRAGMA wal_autocheckpoint = 1000")
     try:
         yield conn
         conn.commit()
@@ -31,6 +44,38 @@ def connect() -> Generator[sqlite3.Connection, None, None]:
         raise
     finally:
         conn.close()
+
+
+def execute_with_retry(
+    fn: Callable[..., T],
+    *args: Any,
+    max_retries: int = 5,
+    initial_delay: float = 0.05,
+    backoff_factor: float = 2.0,
+    **kwargs: Any,
+) -> T:
+    """
+    Executes a callable that interacts with SQLite, retrying on transient
+    OperationalError: database is locked or busy errors with exponential backoff and jitter.
+    """
+    delay = initial_delay
+    last_err: Exception | None = None
+    for attempt in range(1, max_retries + 1):
+        try:
+            return fn(*args, **kwargs)
+        except sqlite3.OperationalError as exc:
+            msg = str(exc).lower()
+            if "locked" in msg or "busy" in msg:
+                last_err = exc
+                if attempt == max_retries:
+                    raise
+                jitter = random.uniform(0.01, 0.05)
+                time.sleep(delay + jitter)
+                delay *= backoff_factor
+            else:
+                raise
+    if last_err:
+        raise last_err
 
 
 def init_db() -> None:
@@ -201,6 +246,23 @@ def init_db() -> None:
             WHEN OLD.is_sandbox = 0
             BEGIN
                 SELECT RAISE(ABORT, 'financial_transactions is an append-only ledger for production records: deletions are prohibited.');
+            END;
+
+            CREATE TRIGGER IF NOT EXISTS trg_invoices_paid_immutable
+            BEFORE UPDATE ON invoices
+            FOR EACH ROW
+            WHEN OLD.status = 'paid' AND OLD.is_sandbox = 0
+                 AND (NEW.amount_total != OLD.amount_total OR NEW.amount_subtotal != OLD.amount_subtotal OR NEW.tax_amount != OLD.tax_amount)
+            BEGIN
+                SELECT RAISE(ABORT, 'Paid invoices are immutable financial records: modifying amounts of settled invoices is prohibited.');
+            END;
+
+            CREATE TRIGGER IF NOT EXISTS trg_invoices_paid_no_delete
+            BEFORE DELETE ON invoices
+            FOR EACH ROW
+            WHEN OLD.status = 'paid' AND OLD.is_sandbox = 0
+            BEGIN
+                SELECT RAISE(ABORT, 'Paid invoices are immutable financial records: deleting settled invoices is prohibited.');
             END;
 
             CREATE TABLE IF NOT EXISTS tax_profiles (
