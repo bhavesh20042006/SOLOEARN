@@ -80,9 +80,9 @@ python scripts/run_m7_local_preflight.py
 ```
 
 ### Archive Checksum (M8.0.2 Corrective Release)
-- Archive: `SOLOEARN_Friday_Agent_Core_Ready.zip` (343,099 bytes)
-- Base64 ASCII: `SOLOEARN_Friday_Agent_Core_Ready.zip.b64.txt` (457,468 chars)
-- **SHA256**: `4730871A8F73CEDA66A38E93E8CEB3C2716E0350A65A3B1568B72B28C94ABBEA`
+- Archive: `SOLOEARN_Friday_Agent_Core_Ready.zip` (344,063 bytes)
+- Base64 ASCII: `SOLOEARN_Friday_Agent_Core_Ready.zip.b64.txt` (458,752 chars)
+- **SHA256**: `DB047ECDB854317F146F91142ED3DF229B6F159D2D4B9F130C51A2D8B86A267D`
 
 ### M8.0.2 Corrective Audit Fixes
 Following an independent static code audit of FRIDAY F1–F7 on GitHub, the following 10 real defects were identified and resolved:
